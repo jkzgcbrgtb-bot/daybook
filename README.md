@@ -27,6 +27,18 @@ The default passcode is **1234**. You can change it in Settings → Security.
 
 Opened as a local file, Daybook stores everything in `localStorage` under `daybook.v1`, so the data stays in that browser.
 
+### Key sync (GitHub)
+
+Settings → Sync keeps devices in step through a secret gist on your GitHub account, and no sign-in is needed on each device:
+
+- On the first device, paste a GitHub token that has only the `gist` scope and click **Start syncing**. Daybook shows a **sync code**. Paste that code on your other devices to connect them.
+- Data is encrypted with AES-GCM on the device, using a key derived from the sync code's random 24-character key, before it's uploaded. The gist only holds ciphertext.
+- Devices check for changes every 15 seconds and whenever the page comes back into view. Edits made offline sync once the connection returns.
+- **Remove from this device** stops syncing and erases the local copy, which is useful on a shared computer.
+- You can revoke the token at any time in GitHub → Settings → Developer settings → Personal access tokens. Syncing stops until you connect again with a new token.
+
+### Account sync (claude.ai)
+
 The hosted version on claude.ai also saves your data to your account, in one private document per person (`data/users/<id>/daybook`). Any device signed in to the same account sees the same data, and the sidebar shows the sync status. The passcode is a privacy screen, not encryption: anyone with access to the browser's storage can read the data. Use Settings → Data → Export JSON to back up or move your data.
 
 ## Files

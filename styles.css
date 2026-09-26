@@ -363,3 +363,5 @@ details summary { cursor: pointer; font-weight: 500; }
 .sync-status[data-status="synced"]::before { background: var(--c3); }
 .sync-status[data-status="saving"]::before, .sync-status[data-status="connecting"]::before { background: var(--c4); }
 .sync-status[data-status="error"]::before, .sync-status[data-status="readonly"]::before, .sync-status[data-status="full"]::before { background: var(--danger); }
+.sync-key { word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; background: var(--surface-2); padding: 5px 9px; border-radius: 7px; user-select: all; }
+#cloud-status[data-status="error"] { color: var(--danger); }

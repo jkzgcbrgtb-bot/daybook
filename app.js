@@ -690,6 +690,8 @@ function viewSettings() {
       </form>
     </section>
 
+    ${syncCard()}
+
     <section class="card"><h2>Today dashboard</h2><p class="muted small">Drag or use the arrows to reorder. Untick to hide a section.</p>
       <ul class="order-list" id="order-list">${s.sections.map((sec, i) => `<li draggable="true" data-order="${sec.id}" class="${sec.visible ? '' : 'off'}">
         <span class="grip">${ICONS.grip}</span>
@@ -713,7 +715,7 @@ function viewSettings() {
       </div>
     </section>
 
-    <section class="card"><h2>Data</h2><p class="muted small">Everything is stored in this browser. Export a backup to move it elsewhere.</p>
+    <section class="card"><h2>Data</h2><p class="muted small">A copy of everything is kept in this browser. Export a backup file any time. While syncing, Delete all data erases it on every device.</p>
       <div class="row wrap">
         <button class="btn" data-action="export">Export JSON</button>
         <label class="btn">Import JSON<input type="file" accept="application/json" data-import hidden></label>
@@ -1387,47 +1389,59 @@ function flushRender() { if (renderPending && !isEditing()) { renderPending = fa
 document.addEventListener('focusout', () => setTimeout(flushRender, 0));
 
 /* ---------- Sync ----------
-   When Daybook runs as a hosted claude.ai page, the whole state is mirrored to one private
-   document in the page's store, so every device signed in to the same account sees the same data.
-   Opened as a local file there is no store, and localStorage is the only copy. */
-const sync = { ref: null, ready: false, lastJson: '', timer: 0, writing: false, again: false, status: 'local' };
+   Two ways to keep devices in step, both mirroring the whole state as one JSON document:
+   - Key sync (GitHub Pages or a local file): the state is encrypted on the device with a
+     private sync key and stored in a secret gist on the person's GitHub account, so GitHub
+     only ever sees ciphertext.
+   - Account sync (hosted on claude.ai): one private document per signed-in person.
+   Without either, localStorage is the only copy. */
+const SYNC_KEY_STORE = 'daybook.sync';
+const sync = { write: null, ready: false, lastJson: '', timer: 0, writing: false, again: false, dirty: false, status: 'local' };
 const SYNC_LABEL = {
-  local: 'Saved on this device', connecting: 'Connecting…', saving: 'Saving…', synced: 'Synced to your account',
-  error: 'Sync paused. Saved on this device.', readonly: 'Read-only: changes are not saved', full: 'Too much data to sync',
+  local: 'Saved on this device', connecting: 'Connecting…', saving: 'Saving…', synced: 'Synced across your devices',
+  error: 'Offline. Changes are saved here and will sync later.', readonly: 'Read-only: changes are not saved', full: 'Too much data to sync',
 };
+// Persisted so edits made offline still get pushed after a reload.
+function markDirty(v) {
+  sync.dirty = v;
+  try { if (v) localStorage.setItem('daybook.syncDirty', '1'); else localStorage.removeItem('daybook.syncDirty'); } catch (_) { /* ignore */ }
+}
 function setSync(status) {
   sync.status = status;
-  const el = $('#sync-status');
-  if (el) { el.textContent = SYNC_LABEL[status]; el.dataset.status = status; }
+  for (const el of $$('#sync-status, #cloud-status')) { el.textContent = SYNC_LABEL[status]; el.dataset.status = status; }
 }
 function queuePush() {
-  if (!sync.ref || !sync.ready) return;
+  if (!sync.write || !sync.ready) return;
+  markDirty(true);
   setSync('saving');
   clearTimeout(sync.timer);
   sync.timer = setTimeout(pushNow, 600);
 }
 async function pushNow() {
+  clearTimeout(sync.timer);
   sync.timer = 0;
+  if (!sync.write) return;
   if (sync.writing) { sync.again = true; return; }
   const json = JSON.stringify(state);
-  if (json === sync.lastJson) { setSync('synced'); return; }
+  if (json === sync.lastJson) { markDirty(false); setSync('synced'); return; }
   if (json.length > 250000) { setSync('full'); return; }
   sync.writing = true;
-  sync.lastJson = json;
   try {
-    await sync.ref.set({ json, savedAt: Date.now() });
+    await sync.write(json);
+    sync.lastJson = json;
+    markDirty(false);
     setSync('synced');
   } catch (e) {
-    sync.lastJson = '';
+    markDirty(true);
     setSync(e?.code === 'invalid_argument' ? 'readonly' : 'error');
   } finally {
     sync.writing = false;
     if (sync.again) { sync.again = false; pushNow(); }
   }
 }
-function applyRemote(json) {
-  // A local edit still waiting to be sent wins; it will overwrite the remote copy in a moment.
-  if (sync.timer || sync.writing) return;
+function applyRemote(json, force = false) {
+  // Local edits that haven't been sent yet win; they overwrite the remote copy on the next push.
+  if (!force && (sync.timer || sync.writing || sync.dirty)) return;
   try {
     const next = normalize(JSON.parse(json));
     sync.lastJson = json;
@@ -1438,14 +1452,17 @@ function applyRemote(json) {
     safeRender();
   } catch (_) { setSync('error'); }
 }
-async function initSync() {
+
+/* Account sync (claude.ai) */
+async function initAccountSync() {
   if (!window.claude?.use) return;
   setSync('connecting');
   const [user, db] = await Promise.all([window.claude.use('user'), window.claude.use('db')]);
   const id = user ? await user.id() : null;
   if (!db || !id) { setSync('local'); return; }
-  sync.ref = db.doc(`data/users/${id}/daybook`);
-  sync.ref.onSnapshot((snap) => {
+  const ref = db.doc(`data/users/${id}/daybook`);
+  sync.write = (json) => ref.set({ json, savedAt: Date.now() });
+  ref.onSnapshot((snap) => {
     if (snap.metadata.hasPendingWrites) return;
     if (!snap.exists) {
       // Only a server-confirmed "nothing saved yet" means this is the first device: upload what's here.
@@ -1459,8 +1476,243 @@ async function initSync() {
   }, () => setSync('error'));
 }
 
+/* Key sync (GitHub gist) */
+const cloud = { key: '', token: '', aes: null, file: '', gistId: '', lastStamp: null, etag: '', poll: 0 };
+const KEY_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O or 1/I to misread
+const TOKEN_URL = 'https://github.com/settings/tokens/new?scopes=gist&description=Daybook%20sync';
+// Hosted on claude.ai the page can't reach GitHub, so it uses account sync there instead.
+const cloudConfigured = () => !window.claude?.use;
+function newSyncKey() {
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  return [...bytes].map((b) => KEY_ALPHABET[b % 32]).join('').match(/.{4}/g).join('-');
+}
+function normalizeKey(raw) {
+  const chars = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (chars.length !== 24 || [...chars].some((c) => !KEY_ALPHABET.includes(c))) return null;
+  return chars.match(/.{4}/g).join('-');
+}
+const validToken = (t) => /^(ghp_|github_pat_|gho_)[A-Za-z0-9_]{20,}$/.test(t);
+// A sync code bundles everything another device needs: the encryption key and the GitHub token.
+const syncCode = () => `${cloud.key}~${cloud.token}`;
+function parseSyncCode(raw) {
+  const [k, t] = raw.trim().split('~');
+  const key = normalizeKey(k || ''), token = (t || '').trim();
+  return key && validToken(token) ? { key, token } : null;
+}
+const utf8 = new TextEncoder();
+function toB64(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+const fromB64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+async function deriveCloud(key) {
+  const hash = await crypto.subtle.digest('SHA-256', utf8.encode(`daybook-vault-id:${key}`));
+  const hex = [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const base = await crypto.subtle.importKey('raw', utf8.encode(key), 'PBKDF2', false, ['deriveKey']);
+  const aes = await crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: utf8.encode('daybook-vault-enc'), iterations: 200000, hash: 'SHA-256' },
+    base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  return { aes, file: `daybook-${hex.slice(0, 16)}.txt` };
+}
+async function encryptJson(json) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, cloud.aes, utf8.encode(json));
+  return `v1.${toB64(iv)}.${toB64(ct)}`;
+}
+async function decryptJson(data) {
+  const [, iv, ct] = data.trim().split('.');
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(iv) }, cloud.aes, fromB64(ct));
+  return new TextDecoder().decode(plain);
+}
+async function gh(path, { method = 'GET', body, token = cloud.token, etag } = {}) {
+  const headers = { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}` };
+  if (body) headers['Content-Type'] = 'application/json';
+  if (etag) headers['If-None-Match'] = etag;
+  const res = await fetch(`https://api.github.com${path}`, { method, headers, body: body && JSON.stringify(body), cache: 'no-store' });
+  if (res.status === 304) return { notModified: true };
+  if (res.status === 401) throw Object.assign(new Error('bad_token'), { code: 'bad_token' });
+  if (!res.ok) throw Object.assign(new Error(`GitHub ${res.status}`), { code: 'http' });
+  return { data: await res.json(), etag: res.headers.get('ETag') || '' };
+}
+async function gistContent(gist) {
+  const f = gist.files[cloud.file];
+  if (!f) throw Object.assign(new Error('not_found'), { code: 'not_found' });
+  if (!f.truncated) return f.content;
+  return (await fetch(f.raw_url, { cache: 'no-store' })).text();
+}
+async function findGist(token, file) {
+  for (let page = 1; page <= 10; page++) {
+    const { data } = await gh(`/gists?per_page=100&page=${page}`, { token });
+    const hit = data.find((g) => g.files && g.files[file]);
+    if (hit) return hit.id;
+    if (data.length < 100) return null;
+  }
+  return null;
+}
+async function cloudWrite(json) {
+  const content = await encryptJson(json);
+  const { data } = cloud.gistId
+    ? await gh(`/gists/${cloud.gistId}`, { method: 'PATCH', body: { files: { [cloud.file]: { content } } } })
+    : await gh('/gists', { method: 'POST', body: { description: 'Daybook sync (encrypted)', public: false, files: { [cloud.file]: { content } } } });
+  cloud.gistId = data.id;
+  cloud.lastStamp = data.updated_at;
+  cloud.etag = '';
+  saveCloudLocal();
+}
+async function cloudPull() {
+  if (sync.writing || sync.timer) return;
+  if (sync.dirty) { pushNow(); return; }
+  try {
+    const res = await gh(`/gists/${cloud.gistId}`, { etag: cloud.etag });
+    if (res.notModified) { if (sync.status !== 'saving') setSync('synced'); return; }
+    cloud.etag = res.etag;
+    if (res.data.updated_at === cloud.lastStamp) { setSync('synced'); return; }
+    const json = await decryptJson(await gistContent(res.data));
+    cloud.lastStamp = res.data.updated_at;
+    if (json === sync.lastJson) setSync('synced'); else applyRemote(json);
+  } catch (_) { setSync('error'); }
+}
+function saveCloudLocal() {
+  try { localStorage.setItem(SYNC_KEY_STORE, JSON.stringify({ key: cloud.key, token: cloud.token, gistId: cloud.gistId })); } catch (_) { /* lasts this visit only */ }
+}
+function startPolling() {
+  clearInterval(cloud.poll);
+  cloud.poll = setInterval(() => { if (!document.hidden) cloudPull(); }, 15000);
+}
+async function startCloud({ key, token }, mode) {
+  setSync('connecting');
+  const d = await deriveCloud(key);
+  let gistId = null, gist = null;
+  if (mode === 'download') {
+    gistId = await findGist(token, d.file);
+    if (!gistId) throw Object.assign(new Error('not_found'), { code: 'not_found' });
+    ({ data: gist } = await gh(`/gists/${gistId}`, { token }));
+  } else {
+    await gh('/gists?per_page=1', { token }); // checks the token works before anything changes
+  }
+  Object.assign(cloud, d, { key, token, gistId: gistId || '', lastStamp: null, etag: '' });
+  sync.write = cloudWrite;
+  sync.ready = true;
+  sync.lastJson = '';
+  if (gist) {
+    const json = await decryptJson(await gistContent(gist));
+    cloud.lastStamp = gist.updated_at;
+    saveCloudLocal();
+    markDirty(false);
+    applyRemote(json, true);
+  } else {
+    await pushNow();
+    if (!cloud.gistId) throw Object.assign(new Error('upload failed'), { code: 'http' });
+  }
+  startPolling();
+}
+function stopCloud() {
+  clearInterval(cloud.poll);
+  Object.assign(cloud, { key: '', token: '', aes: null, file: '', gistId: '', lastStamp: null, etag: '', poll: 0 });
+  Object.assign(sync, { write: null, ready: false, lastJson: '' });
+  markDirty(false);
+  try { localStorage.removeItem(SYNC_KEY_STORE); } catch (_) { /* ignore */ }
+  setSync('local');
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden && cloud.gistId) cloudPull(); });
+
+async function initKeySync() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(SYNC_KEY_STORE) || 'null'); } catch (_) { /* nothing saved */ }
+  if (!saved?.key || !saved?.token) return;
+  try {
+    Object.assign(cloud, await deriveCloud(saved.key), { key: saved.key, token: saved.token, gistId: saved.gistId || '' });
+    sync.write = cloudWrite;
+    sync.ready = true;
+    // Seed lastJson with what's stored here, so the first pull only applies real changes.
+    sync.lastJson = JSON.stringify(state);
+    try { sync.dirty = localStorage.getItem('daybook.syncDirty') === '1'; } catch (_) { /* ignore */ }
+    if (!cloud.gistId) cloud.gistId = await findGist(cloud.token, cloud.file) || '';
+    startPolling();
+    if (cloud.gistId) await cloudPull(); else await pushNow();
+  } catch (_) { setSync('error'); }
+}
+
+function syncCard() {
+  if (!cloudConfigured()) return '';
+  if (!cloud.key) {
+    return `<section class="card"><h2>Sync</h2>
+      <p class="muted small">Keep your devices in step through your GitHub account. Your data is encrypted on this device before it's uploaded, so the copy on GitHub is unreadable without your sync code.</p>
+      <div class="set-row"><div class="l"><b>First device</b><span>Paste a GitHub token that can only access gists. <a href="${TOKEN_URL}" target="_blank" rel="noopener">Create one on GitHub</a>, set Expiration to "No expiration", then click Generate token.</span></div>
+        <form data-form="cloud-create" class="row" style="flex:1;min-width:240px">
+          <input class="input" id="gh-token-input" name="token" placeholder="ghp_…" autocomplete="off" spellcheck="false" aria-label="GitHub token">
+          <button class="btn primary">Start syncing</button></form></div>
+      <div class="set-row"><div class="l"><b>Already syncing on another device?</b><span>Paste the sync code from that device's Settings. The synced data replaces what's on this device.</span></div>
+        <form data-form="cloud-connect" class="row" style="flex:1;min-width:240px">
+          <input class="input" id="sync-code-input" name="code" placeholder="Sync code" autocomplete="off" spellcheck="false" aria-label="Sync code">
+          <button class="btn">Connect</button></form></div>
+      <div class="small" id="cloud-msg" role="alert"></div>
+    </section>`;
+  }
+  return `<section class="card"><h2>Sync</h2>
+    ${settingsRow('Status', `<span id="cloud-status" data-status="${sync.status}">${SYNC_LABEL[sync.status]}</span>`, '<button class="btn" data-action="cloud-now">Sync now</button>')}
+    ${settingsRow('Your sync code', 'Paste it into Settings → Sync on your other devices. Keep it private: anyone with it can read your data.',
+      `<div class="row" style="min-width:0;max-width:100%"><code class="sync-key">${ui.showKey ? esc(syncCode()) : '••••••••••••••••••••'}</code>
+       <button class="btn sm" data-action="cloud-show">${ui.showKey ? 'Hide' : 'Show'}</button>
+       <button class="btn sm" data-action="cloud-copy">Copy</button></div>`)}
+    ${settingsRow('Disconnect this device', 'Stops syncing here. Your data stays on this device and on your other devices.', '<button class="btn" data-action="cloud-disconnect">Disconnect</button>')}
+    ${settingsRow('Remove from this device', 'For a shared or school computer: stops syncing and erases Daybook’s data from this browser only. Your other devices keep everything.', '<button class="btn danger" data-action="cloud-forget">Remove</button>')}
+  </section>`;
+}
+function settingsRow(title, desc, control) {
+  return `<div class="set-row"><div class="l"><b>${title}</b><span>${desc}</span></div>${control}</div>`;
+}
+function cloudFail(e) {
+  const msg = $('#cloud-msg');
+  if (!msg) return;
+  msg.style.color = 'var(--danger)';
+  msg.textContent = e?.code === 'bad_token' ? 'GitHub didn’t accept that token. Check it was copied in full and hasn’t been deleted.'
+    : e?.code === 'not_found' ? 'No synced data matches that sync code. Copy it again from your other device.'
+    : 'Couldn’t reach GitHub. Check your connection and try again.';
+}
+Object.assign(ACTIONS, {
+  'cloud-now': () => (sync.dirty ? pushNow() : cloudPull()),
+  'cloud-show': () => { ui.showKey = !ui.showKey; render(); },
+  'cloud-copy': async () => {
+    try { await navigator.clipboard.writeText(syncCode()); toast('Sync code copied'); }
+    catch (_) { ui.showKey = true; render(); toast('Select the code and copy it'); }
+  },
+  'cloud-disconnect': () => askConfirm('Stop syncing on this device?', 'Disconnect', () => { stopCloud(); ui.showKey = false; render(); toast('This device is no longer syncing'); }),
+  'cloud-forget': () => askConfirm('Stop syncing and erase Daybook’s data from this browser? Your other devices keep everything.', 'Remove', () => {
+    stopCloud();
+    state = emptyState();
+    try { localStorage.removeItem(STORE); } catch (_) { /* ignore */ }
+    ui.showKey = false;
+    ui.activeNote = null;
+    render();
+    toast('Removed from this device');
+  }),
+});
+FORMS['cloud-create'] = async (f) => {
+  const token = (new FormData(f).get('token') || '').trim();
+  if (!validToken(token)) return cloudFail({ code: 'bad_token' });
+  $('#cloud-msg').textContent = 'Connecting…';
+  $('#cloud-msg').style.color = '';
+  try { await startCloud({ key: newSyncKey(), token }, 'upload'); ui.showKey = true; render(); toast('Syncing. Copy your sync code to set up other devices.'); }
+  catch (e) { stopCloud(); render(); cloudFail(e); }
+};
+FORMS['cloud-connect'] = async (f) => {
+  const parsed = parseSyncCode(new FormData(f).get('code') || '');
+  if (!parsed) {
+    $('#cloud-msg').style.color = 'var(--danger)';
+    $('#cloud-msg').textContent = 'That doesn’t look like a sync code. Copy the whole code from Settings → Sync on your other device.';
+    return;
+  }
+  $('#cloud-msg').textContent = 'Connecting…';
+  $('#cloud-msg').style.color = '';
+  try { await startCloud(parsed, 'download'); render(); toast('Connected. This device is now syncing.'); }
+  catch (e) { stopCloud(); render(); cloudFail(e); }
+};
+
 /* ---------- Boot ---------- */
 render();
 renderLock();
 setSync('local');
-initSync();
+if (cloudConfigured()) initKeySync(); else initAccountSync();
