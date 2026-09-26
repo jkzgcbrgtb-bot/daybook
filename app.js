@@ -1854,7 +1854,7 @@ async function initAccountSync() {
 }
 
 /* Key sync (GitHub gist) */
-const cloud = { key: '', token: '', aes: null, file: '', gistId: '', lastStamp: null, etag: '', poll: 0 };
+const cloud = { key: '', token: '', aes: null, file: '', gistId: '', etag: '', poll: 0 };
 const KEY_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O or 1/I to misread
 const TOKEN_URL = 'https://github.com/settings/tokens/new?scopes=gist&description=Daybook%20sync';
 // Hosted on claude.ai the page can't reach GitHub, so it uses account sync there instead.
@@ -1919,6 +1919,11 @@ async function gistContent(gist) {
   if (!f.truncated) return f.content;
   return (await fetch(f.raw_url, { cache: 'no-store' })).text();
 }
+// Every Daybook sync gist on the account, whatever its key.
+async function daybookGists(token) {
+  const { data } = await gh('/gists?per_page=100', { token });
+  return data.filter((g) => Object.keys(g.files || {}).some((f) => /^daybook-[0-9a-f]{16}\.txt$/.test(f)));
+}
 async function findGist(token, file) {
   for (let page = 1; page <= 10; page++) {
     const { data } = await gh(`/gists?per_page=100&page=${page}`, { token });
@@ -1934,7 +1939,6 @@ async function cloudWrite(json) {
     ? await gh(`/gists/${cloud.gistId}`, { method: 'PATCH', body: { files: { [cloud.file]: { content } } } })
     : await gh('/gists', { method: 'POST', body: { description: 'Daybook sync (encrypted)', public: false, files: { [cloud.file]: { content } } } });
   cloud.gistId = data.id;
-  cloud.lastStamp = data.updated_at;
   cloud.etag = '';
   saveCloudLocal();
 }
@@ -1944,10 +1948,9 @@ async function cloudPull() {
   try {
     const res = await gh(`/gists/${cloud.gistId}`, { etag: cloud.etag });
     if (res.notModified) { if (sync.status !== 'saving') setSync('synced'); return; }
-    cloud.etag = res.etag;
-    if (res.data.updated_at === cloud.lastStamp) { setSync('synced'); return; }
+    // updated_at only has one-second resolution, so compare the decrypted content itself.
     const json = await decryptJson(await gistContent(res.data));
-    cloud.lastStamp = res.data.updated_at;
+    cloud.etag = res.etag;
     if (json === sync.lastJson) setSync('synced'); else applyRemote(json);
   } catch (_) { setSync('error'); }
 }
@@ -1969,13 +1972,12 @@ async function startCloud({ key, token }, mode) {
   } else {
     await gh('/gists?per_page=1', { token }); // checks the token works before anything changes
   }
-  Object.assign(cloud, d, { key, token, gistId: gistId || '', lastStamp: null, etag: '' });
+  Object.assign(cloud, d, { key, token, gistId: gistId || '', etag: '' });
   sync.write = cloudWrite;
   sync.ready = true;
   sync.lastJson = '';
   if (gist) {
     const json = await decryptJson(await gistContent(gist));
-    cloud.lastStamp = gist.updated_at;
     saveCloudLocal();
     markDirty(false);
     applyRemote(json, true);
@@ -1987,7 +1989,7 @@ async function startCloud({ key, token }, mode) {
 }
 function stopCloud() {
   clearInterval(cloud.poll);
-  Object.assign(cloud, { key: '', token: '', aes: null, file: '', gistId: '', lastStamp: null, etag: '', poll: 0 });
+  Object.assign(cloud, { key: '', token: '', aes: null, file: '', gistId: '', etag: '', poll: 0 });
   Object.assign(sync, { write: null, ready: false, lastJson: '' });
   markDirty(false);
   try { localStorage.removeItem(SYNC_KEY_STORE); } catch (_) { /* ignore */ }
@@ -2050,6 +2052,11 @@ function cloudFail(e) {
     : 'Couldn’t reach GitHub. Check your connection and try again.';
 }
 Object.assign(ACTIONS, {
+  'cloud-force': () => {
+    const f = $('form[data-form="cloud-create"]');
+    f.dataset.force = '1';
+    f.requestSubmit();
+  },
   'cloud-now': () => (sync.dirty ? pushNow() : cloudPull()),
   'cloud-show': () => { ui.showKey = !ui.showKey; render(); },
   'cloud-copy': async () => {
@@ -2072,6 +2079,17 @@ FORMS['cloud-create'] = async (f) => {
   if (!validToken(token)) return cloudFail({ code: 'bad_token' });
   $('#cloud-msg').textContent = 'Connecting…';
   $('#cloud-msg').style.color = '';
+  // Starting a second sync splits devices apart, so steer people to Connect instead.
+  if (!f.dataset.force) {
+    try {
+      if ((await daybookGists(token)).length) {
+        $('#cloud-msg').style.color = 'var(--danger)';
+        $('#cloud-msg').innerHTML = `This GitHub account already has Daybook syncing on another device. To share data with it, open Settings → Sync on that device, copy its sync code, and paste it into <b>Already syncing on another device?</b> below.
+          <button type="button" class="btn sm" data-action="cloud-force" style="margin-top:6px">Start a separate sync anyway</button>`;
+        return;
+      }
+    } catch (e) { return cloudFail(e); }
+  }
   try { await startCloud({ key: newSyncKey(), token }, 'upload'); ui.showKey = true; render(); toast('Syncing. Copy your sync code to set up other devices.'); }
   catch (e) { stopCloud(); render(); cloudFail(e); }
 };
