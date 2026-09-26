@@ -18,11 +18,14 @@ const NAV = [
   { id: 'stats', label: 'Stats' },
   { id: 'settings', label: 'Settings', locked: true },
 ];
-const SECTIONS = { focus: 'Focus line', schedule: 'Schedule', due: 'Due today', habits: 'Habits', goals: 'Goals' };
+const SECTIONS = { focus: 'Focus line', timer: 'Focus timer', schedule: 'Schedule', due: 'Due today', habits: 'Habits', goals: 'Goals' };
 const ACCENTS = { indigo: '#4f46e5', teal: '#0d8f86', rose: '#d6285a', amber: '#c26a00', green: '#178a3e' };
 const PRIORITY = { none: 'None', low: 'Low', med: 'Medium', high: 'High' };
 const PRIO_RANK = { high: 0, med: 1, low: 2, none: 3 };
 const DURATIONS = [15, 30, 45, 60, 90, 120, 180, 240];
+const REPEAT = { none: 'Does not repeat', daily: 'Every day', weekdays: 'Every weekday (Mon–Fri)', weekly: 'Every week', monthly: 'Every month' };
+const REPEAT_SHORT = { daily: 'Daily', weekdays: 'Weekdays', weekly: 'Weekly', monthly: 'Monthly' };
+const TIMER_MODES = { focus: ['Focus', 25], short: ['Short break', 5], long: ['Long break', 15] };
 
 /* ---------- Icons ---------- */
 const svg = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
@@ -68,65 +71,8 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const lastNDays = (n) => Array.from({ length: n }, (_, i) => ymd(addDays(new Date(), i - n + 1)));
 const fmtHours = (min) => { const h = min / 60; return `${Number.isInteger(h) ? h : h.toFixed(1)} h`; };
 
-/* ---------- Seed data ---------- */
-function seed() {
-  const now = new Date();
-  const T = ymd(now);
-  const D = (n) => ymd(addDays(now, n));
-  let s = 7;
-  const rng = () => ((s = (s * 16807) % 2147483647) / 2147483647);
-  const st = (title, done = false) => ({ id: uid(), title, done });
-
-  const lists = [
-    { id: 'l-work', name: 'Work', color: 1 },
-    { id: 'l-personal', name: 'Personal', color: 2 },
-    { id: 'l-health', name: 'Health', color: 3 },
-    { id: 'l-learn', name: 'Learning', color: 4 },
-  ];
-  const tasks = [];
-  const mk = (o) => tasks.push({ id: uid(), title: '', listId: 'l-work', priority: 'none', due: null, done: false, doneAt: null, notes: '', subtasks: [], block: null, createdAt: Date.now(), ...o });
-
-  mk({ title: 'Finish Q4 planning doc', priority: 'high', due: T, block: { date: T, start: 540, dur: 90 },
-    subtasks: [st('Draft goals', true), st('Budget table'), st('Send to team for review')] });
-  mk({ title: 'Team standup', due: T, block: { date: T, start: 660, dur: 30 } });
-  mk({ title: 'Gym — legs day', listId: 'l-health', due: T, block: { date: T, start: 1050, dur: 60 } });
-  mk({ title: 'Reply to Sam about the contract', priority: 'med', due: T });
-  mk({ title: 'Pay electricity bill', listId: 'l-personal', priority: 'high', due: D(-1) });
-  mk({ title: 'Read chapter 4 of Deep Work', listId: 'l-learn', due: D(2) });
-  mk({ title: 'Book dentist appointment', listId: 'l-personal', priority: 'low' });
-  mk({ title: 'Prep slides for Monday review', priority: 'med', due: D(3), subtasks: [st('Outline'), st('Charts'), st('Rehearse')] });
-  mk({ title: 'Meal prep for the week', listId: 'l-health' });
-  mk({ title: 'Refactor onboarding flow', priority: 'med', due: D(5) });
-  mk({ title: 'Plan weekend hike', listId: 'l-personal', priority: 'low', due: D(4) });
-  mk({ title: '1:1 with Priya', due: D(1), block: { date: D(1), start: 840, dur: 45 } });
-  mk({ title: 'Spanish lesson', listId: 'l-learn', block: { date: D(2), start: 1140, dur: 60 } });
-
-  const history = ['Inbox zero', 'Code review', 'Write weekly update', 'Groceries', 'Yoga class', 'Online course module',
-    'Fix login bug', 'Call mom', 'Laundry', 'Design sync', 'Evening run', 'Podcast notes', 'Update resume', 'Budget check-in'];
-  for (let i = 1; i <= 14; i++) {
-    const n = 1 + Math.floor(rng() * 4);
-    for (let j = 0; j < n; j++) {
-      const d = D(-i);
-      const list = lists[Math.floor(rng() * lists.length)];
-      const start = (8 + Math.floor(rng() * 10)) * 60;
-      const dur = [30, 45, 60, 90][Math.floor(rng() * 4)];
-      mk({ title: history[Math.floor(rng() * history.length)], listId: list.id, due: d, done: true,
-        doneAt: parse(d).getTime() + (start + dur) * 60000, block: rng() < 0.75 ? { date: d, start, dur } : null });
-    }
-  }
-  mk({ title: 'Morning journal', listId: 'l-personal', due: T, done: true, doneAt: Date.now() - 3600000 });
-
-  const habits = [
-    { id: uid(), name: 'Morning run', goal: 4, reminder: '07:00', p: 0.6 },
-    { id: uid(), name: 'Read 20 minutes', goal: 7, reminder: '21:30', p: 0.8 },
-    { id: uid(), name: 'Meditate', goal: 5, reminder: '08:00', p: 0.7 },
-    { id: uid(), name: 'No phone after 10pm', goal: 6, reminder: '22:00', p: 0.45 },
-  ].map(({ p, ...h }) => {
-    const log = {};
-    for (let i = 1; i <= 30; i++) if (rng() < p) log[D(-i)] = true;
-    return { ...h, log };
-  });
-
+/* ---------- Starting state ---------- */
+function emptyState() {
   return {
     version: 1,
     passcode: DEFAULT_PIN,
@@ -135,24 +81,14 @@ function seed() {
       sections: Object.keys(SECTIONS).map((id) => ({ id, visible: true })),
       hiddenNav: [],
     },
-    focus: { [T]: 'Ship the Q4 plan before lunch' },
-    lists,
-    tasks,
-    notes: [
-      { id: uid(), title: 'Q4 planning — raw ideas', listId: 'l-work', updatedAt: Date.now() - 7200000,
-        body: 'Themes:\n- Reduce onboarding drop-off\n- Faster weekly reporting\n- Hire one more designer\n\nOpen questions: budget split between tooling and headcount?' },
-      { id: uid(), title: 'Books to read', listId: 'l-learn', updatedAt: Date.now() - 86400000 * 2,
-        body: 'Deep Work — Cal Newport\nFour Thousand Weeks — Oliver Burkeman\nThe Pragmatic Programmer\nAtomic Habits (re-read)' },
-      { id: uid(), title: 'Running plan', listId: 'l-health', updatedAt: Date.now() - 86400000 * 5,
-        body: 'Mon: easy 5k\nWed: intervals 6×400m\nSat: long run, +1km each week\n\nGoal: half marathon in spring.' },
-    ],
-    habits,
-    goals: [
-      { id: uid(), title: 'Read 12 books this year', current: 7, target: 12, unit: 'books' },
-      { id: uid(), title: 'Run 200 km', current: 128, target: 200, unit: 'km' },
-      { id: uid(), title: 'Ship portfolio site', current: 3, target: 5, unit: 'milestones' },
-    ],
+    focus: {},
+    lists: [{ id: 'l-inbox', name: 'Inbox', color: 1 }],
+    tasks: [],
+    notes: [],
+    habits: [],
+    goals: [],
     reviews: {},
+    pomodoros: [],
   };
 }
 
@@ -161,23 +97,30 @@ function load() {
   try {
     const raw = localStorage.getItem(STORE);
     if (raw) return normalize(JSON.parse(raw));
-  } catch (_) { /* fall through to seed */ }
-  return seed();
+  } catch (_) { /* start empty */ }
+  return emptyState();
 }
 function normalize(s) {
-  const base = seed();
+  const base = emptyState();
   const out = { ...base, ...s, settings: { ...base.settings, ...(s.settings || {}) } };
-  for (const k of ['lists', 'tasks', 'notes', 'habits', 'goals']) if (!Array.isArray(out[k])) out[k] = [];
+  for (const k of ['lists', 'tasks', 'notes', 'habits', 'goals', 'pomodoros']) if (!Array.isArray(out[k])) out[k] = [];
   if (!out.lists.length) out.lists = base.lists;
   const known = new Set(out.settings.sections.map((x) => x.id));
-  Object.keys(SECTIONS).forEach((id) => known.has(id) || out.settings.sections.push({ id, visible: true }));
+  Object.keys(SECTIONS).forEach((id) => {
+    if (known.has(id)) return;
+    // New sections slot in after the one they follow in SECTIONS, so upgrades land in a sensible place.
+    const keys = Object.keys(SECTIONS), prev = keys[keys.indexOf(id) - 1];
+    const at = out.settings.sections.findIndex((x) => x.id === prev);
+    out.settings.sections.splice(at + 1, 0, { id, visible: true });
+  });
   out.settings.sections = out.settings.sections.filter((x) => SECTIONS[x.id]);
-  out.tasks.forEach((t) => { t.subtasks = t.subtasks || []; });
+  out.tasks.forEach((t) => { t.subtasks = t.subtasks || []; t.repeat = t.repeat || 'none'; });
   out.habits.forEach((h) => { h.log = h.log || {}; });
   return out;
 }
 function save() {
-  try { localStorage.setItem(STORE, JSON.stringify(state)); } catch (_) { toast('Could not save — storage is unavailable'); }
+  try { localStorage.setItem(STORE, JSON.stringify(state)); } catch (_) { /* storage blocked; sync may still work */ }
+  queuePush();
 }
 
 let state = load();
@@ -188,6 +131,7 @@ const ui = {
   noteQ: '', noteList: 'all', activeNote: null,
   hoursRange: 'week',
   reminded: {},
+  timer: { mode: 'focus', left: TIMER_MODES.focus[1] * 60, running: false, endAt: 0, taskId: '' },
 };
 
 /* ---------- Lookups ---------- */
@@ -225,16 +169,52 @@ function weekCount(h) {
   return n;
 }
 
+/* ---------- Repeating tasks ---------- */
+const daysBetween = (a, b) => Math.round((parse(b) - parse(a)) / 86400000);
+function stepDate(ds, repeat) {
+  const d = parse(ds);
+  if (repeat === 'daily') d.setDate(d.getDate() + 1);
+  else if (repeat === 'weekdays') { do d.setDate(d.getDate() + 1); while (d.getDay() === 0 || d.getDay() === 6); }
+  else if (repeat === 'weekly') d.setDate(d.getDate() + 7);
+  else if (repeat === 'monthly') {
+    const day = d.getDate();
+    d.setDate(1);
+    d.setMonth(d.getMonth() + 1);
+    d.setDate(Math.min(day, new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()));
+  }
+  return ymd(d);
+}
+// Completing a repeating task keeps it as done (for stats) and creates the next occurrence,
+// always landing after today so an overdue task doesn't spawn another overdue one.
+function spawnNext(t) {
+  const base = t.due || t.block?.date || todayStr();
+  let next = stepDate(base, t.repeat);
+  while (next <= todayStr()) next = stepDate(next, t.repeat);
+  const shift = daysBetween(base, next);
+  const copy = {
+    ...t, id: uid(), done: false, doneAt: null, nextId: null, createdAt: Date.now(),
+    subtasks: t.subtasks.map((x) => ({ ...x, id: uid(), done: false })),
+    due: t.due ? next : null,
+    block: t.block ? { ...t.block, date: ymd(addDays(parse(t.block.date), shift)) } : null,
+  };
+  t.nextId = copy.id;
+  state.tasks.push(copy);
+  return copy;
+}
+
 /* =========================================================
    Rendering
    ========================================================= */
 const app = $('#app');
 const main = $('#main');
 
+// When hosted, the viewer may stamp its own theme on <html>; "System" falls back to that.
+const hostTheme = document.documentElement.dataset.theme;
 function applySettings() {
   const r = document.documentElement;
   const s = state.settings;
-  if (s.theme === 'system') delete r.dataset.theme; else r.dataset.theme = s.theme;
+  const theme = s.theme === 'system' ? hostTheme : s.theme;
+  if (theme) r.dataset.theme = theme; else delete r.dataset.theme;
   r.dataset.density = s.density;
   r.dataset.accent = s.accent;
 }
@@ -265,6 +245,7 @@ function taskRow(t) {
   if (t.priority !== 'none') meta.push(`<span class="chip ${t.priority === 'high' ? 'prio-high' : ''}">${PRIORITY[t.priority]} priority</span>`);
   if (t.due) meta.push(`<span class="chip ${!t.done && t.due < todayStr() ? 'overdue' : ''}">${dueLabel(t.due, t.done)}</span>`);
   if (t.block) meta.push(`<span class="chip">${ICONS.clock}${fmtDate(t.block.date)} · ${fmtTime(t.block.start)}</span>`);
+  if (t.repeat && t.repeat !== 'none') meta.push(`<span class="chip">↻ ${REPEAT_SHORT[t.repeat]}</span>`);
   if (t.subtasks.length) meta.push(`<span class="chip">${t.subtasks.filter((s) => s.done).length}/${t.subtasks.length} subtasks</span>`);
   const subs = t.subtasks.length ? `<ul class="subtasks">${t.subtasks.map((s) => `
     <li class="${s.done ? 'done' : ''}"><input type="checkbox" class="check" data-action="toggle-sub" data-id="${t.id}" data-sub="${s.id}" ${s.done ? 'checked' : ''} aria-label="Complete subtask"><span>${esc(s.title)}</span></li>`).join('')}</ul>` : '';
@@ -293,6 +274,25 @@ const TODAY_SECTIONS = {
     return `<section class="card focus-card span-2">
       <div class="focus-label">Today's focus</div>
       <input class="focus-input" data-bind="focus" value="${esc(state.focus[todayStr()] || '')}" placeholder="What one thing would make today a win?" aria-label="Today's focus">
+    </section>`;
+  },
+  timer() {
+    const tm = ui.timer, T = todayStr();
+    const total = TIMER_MODES[tm.mode][1] * 60;
+    const today = state.pomodoros.filter((p) => ymd(new Date(p.at)) === T);
+    const mins = today.reduce((a, p) => a + p.min, 0);
+    const open = state.tasks.filter((t) => !t.done).sort(taskSort);
+    const seg = Object.entries(TIMER_MODES).map(([k, [l]]) => `<button class="${tm.mode === k ? 'on' : ''}" data-action="timer-mode" data-mode="${k}">${l}</button>`).join('');
+    return `<section class="card">
+      <div class="card-head"><h2>Focus timer</h2><span class="chip">${today.length} session${today.length === 1 ? '' : 's'} today · ${mins} min</span></div>
+      <div class="seg">${seg}</div>
+      <div class="timer-display ${tm.running ? 'running' : ''}" id="timer-display">${timerText()}</div>
+      <div class="bar"><span id="timer-bar" style="width:${(1 - tm.left / total) * 100}%"></span></div>
+      <div class="row" style="margin-top:12px">
+        <select class="input" data-timer-task aria-label="Task you're focusing on"><option value="">Not linked to a task</option>${open.map((t) => `<option value="${t.id}" ${t.id === tm.taskId ? 'selected' : ''}>${esc(t.title)}</option>`).join('')}</select>
+        <button class="btn primary" data-action="timer-toggle" style="min-width:84px;justify-content:center">${tm.running ? 'Pause' : tm.left < total ? 'Resume' : 'Start'}</button>
+        <button class="btn" data-action="timer-reset">Reset</button>
+      </div>
     </section>`;
   },
   schedule() {
@@ -638,11 +638,13 @@ function viewStats() {
   });
   const overall = habitRows.length ? Math.round(habitRows.reduce((a, r) => a + r.pct, 0) / habitRows.length) : 0;
 
+  const since = parse(days14[0]).getTime();
+  const focusMin = state.pomodoros.filter((p) => p.at >= since).reduce((a, p) => a + p.min, 0);
   const kpi = (l, v) => `<div class="card kpi"><div class="l">${l}</div><div class="v">${v}</div></div>`;
   const seg = [['week', 'This week'], ['30d', 'Last 30 days']].map(([v, l]) => `<button class="${ui.hoursRange === v ? 'on' : ''}" data-action="hours-range" data-val="${v}">${l}</button>`).join('');
 
   return pageHead('Stats', 'How your days are adding up.') +
-    `<div class="kpis">${kpi('Completed · 14 days', total)}${kpi('Daily average', (total / 14).toFixed(1))}${kpi('Blocked this week', fmtHours(weekBlocked))}${kpi('Habit consistency · 30 days', `${overall}%`)}</div>
+    `<div class="kpis">${kpi('Completed · 14 days', total)}${kpi('Daily average', (total / 14).toFixed(1))}${kpi('Blocked this week', fmtHours(weekBlocked))}${kpi('Habit consistency · 30 days', `${overall}%`)}${kpi('Focus time · 14 days', fmtHours(focusMin))}</div>
     <div class="stack">
       <section class="card"><div class="card-head"><h2>Tasks completed · last 14 days</h2><span class="muted small">${total} total</span></div>${completionChart(days14, counts)}</section>
       <div class="grid grid-2">
@@ -716,7 +718,7 @@ function viewSettings() {
         <button class="btn" data-action="export">Export JSON</button>
         <label class="btn">Import JSON<input type="file" accept="application/json" data-import hidden></label>
         <span class="spacer"></span>
-        <button class="btn danger" data-action="reset">Reset demo data</button>
+        <button class="btn danger" data-action="reset">Delete all data</button>
       </div>
     </section>
   </div>`;
@@ -731,7 +733,15 @@ function openModal(html) {
   $('#modal-root').innerHTML = `<div class="modal-back" data-action="modal-back"><div class="modal" role="dialog" aria-modal="true">${html}</div></div>`;
   setTimeout(() => $('.modal input:not([type=checkbox]), .modal select')?.focus(), 0);
 }
-function closeModal() { $('#modal-root').innerHTML = ''; }
+function closeModal() { $('#modal-root').innerHTML = ''; pendingConfirm = null; flushRender(); }
+let pendingConfirm = null;
+function askConfirm(message, yesLabel, onYes) {
+  openModal(`<h2>${esc(message)}</h2><div class="modal-foot"><span class="spacer"></span>
+    <button type="button" class="btn" data-action="close-modal">Cancel</button>
+    <button type="button" class="btn primary danger" data-action="confirm-yes">${esc(yesLabel)}</button></div>`);
+  pendingConfirm = onYes;
+  setTimeout(() => $('[data-action="confirm-yes"]')?.focus(), 0);
+}
 function toast(msg) {
   const el = document.createElement('div');
   el.className = 'toast';
@@ -758,7 +768,8 @@ function openTaskModal(id, defaults = {}) {
       <label class="field">List<select class="input" name="listId">${listOptions(t.listId)}</select></label>
       <label class="field">Priority<select class="input" name="priority">${Object.entries(PRIORITY).map(([v, l]) => `<option value="${v}" ${t.priority === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label class="field">Due date<input class="input" type="date" name="due" value="${t.due || ''}"></label>
-      <label class="field">Calendar<span class="row" style="height:36px;font-weight:500;color:var(--text)"><input type="checkbox" class="check" name="blocked" data-action="toggle-block-fields" ${t.block ? 'checked' : ''}> Time-block this task</span></label>
+      <label class="field">Repeat<select class="input" name="repeat">${Object.entries(REPEAT).map(([v, l]) => `<option value="${v}" ${(t.repeat || 'none') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="field full">Calendar<span class="row" style="height:36px;font-weight:500;color:var(--text)"><input type="checkbox" class="check" name="blocked" data-action="toggle-block-fields" ${t.block ? 'checked' : ''}> Time-block this task</span></label>
       <div class="full fields ${t.block ? '' : 'hidden'}" id="block-fields" style="grid-template-columns:repeat(3,minmax(0,1fr))">
         <label class="field">Date<input class="input" type="date" name="bdate" value="${b.date}"></label>
         <label class="field">Start<input class="input" type="time" name="bstart" step="900" value="${toHHMM(b.start)}"></label>
@@ -816,10 +827,11 @@ const FORMS = {
     })).filter((s) => s.title);
     const fields = {
       title: d.get('title').trim(), listId: d.get('listId'), priority: d.get('priority'), due: d.get('due') || null,
-      notes: d.get('notes'), subtasks,
+      notes: d.get('notes'), subtasks, repeat: d.get('repeat'),
       block: d.get('blocked') ? { date: d.get('bdate') || todayStr(), start: fromHHMM(d.get('bstart') || '09:00'), dur: +d.get('bdur') } : null,
     };
     if (!fields.title) return;
+    if (fields.repeat !== 'none' && !fields.due && !fields.block) fields.due = todayStr();
     if (f.dataset.id) Object.assign(taskById(f.dataset.id), fields);
     else state.tasks.push({ id: uid(), done: false, doneAt: null, createdAt: Date.now(), ...fields });
     commit(f.dataset.id ? 'Task saved' : 'Task added');
@@ -864,6 +876,16 @@ function commit(msg) { save(); closeModal(); render(); if (msg) toast(msg); }
    ========================================================= */
 const ACTIONS = {
   'toggle-nav': () => app.classList.toggle('nav-open'),
+  'confirm-yes': () => { const fn = pendingConfirm; closeModal(); fn?.(); },
+
+  'timer-mode': (el) => { Object.assign(ui.timer, { mode: el.dataset.mode, left: TIMER_MODES[el.dataset.mode][1] * 60, running: false }); render(); },
+  'timer-toggle': () => {
+    const tm = ui.timer;
+    if (tm.running) { tm.left = Math.max(0, Math.ceil((tm.endAt - Date.now()) / 1000)); tm.running = false; }
+    else { tm.endAt = Date.now() + tm.left * 1000; tm.running = true; }
+    render();
+  },
+  'timer-reset': () => { Object.assign(ui.timer, { left: TIMER_MODES[ui.timer.mode][1] * 60, running: false }); render(); },
   go: (el) => { location.hash = el.dataset.to; },
   lock: () => lock(),
   'close-modal': () => closeModal(),
@@ -873,17 +895,29 @@ const ACTIONS = {
   'edit-task': (el) => openTaskModal(el.dataset.id),
   'delete-task': (el) => {
     const t = taskById(el.dataset.id);
-    if (!t || !confirm(`Delete “${t.title}”?`)) return;
-    state.tasks = state.tasks.filter((x) => x !== t);
-    commit('Task deleted');
+    if (!t) return;
+    askConfirm(`Delete “${t.title}”?`, 'Delete', () => {
+      state.tasks = state.tasks.filter((x) => x !== t);
+      commit('Task deleted');
+    });
   },
   'toggle-task': (el) => {
     const t = taskById(el.dataset.id);
     t.done = !t.done;
     t.doneAt = t.done ? Date.now() : null;
-    if (t.done) t.subtasks.forEach((s) => { s.done = true; });
+    let next = null;
+    if (t.done) {
+      t.subtasks.forEach((s) => { s.done = true; });
+      if (t.repeat && t.repeat !== 'none' && !taskById(t.nextId)) next = spawnNext(t);
+    } else if (t.nextId) {
+      // Un-completing takes back the occurrence it created, unless that one has been done too.
+      const n = taskById(t.nextId);
+      if (n && !n.done) { state.tasks = state.tasks.filter((x) => x !== n); t.nextId = null; }
+      else if (!n) t.nextId = null;
+    }
     save(); render();
-    if (t.done) toast('Nice — task completed');
+    if (next) toast(`Done. Next one is ${fmtDate(next.due || next.block.date, { weekday: 'short', month: 'short', day: 'numeric' })}`);
+    else if (t.done) toast('Nice, task completed');
   },
   'toggle-sub': (el) => {
     const t = taskById(el.dataset.id);
@@ -921,10 +955,11 @@ const ACTIONS = {
   },
   'open-note': (el) => { ui.activeNote = el.dataset.id; render(); },
   'delete-note': (el) => {
-    if (!confirm('Delete this note?')) return;
-    state.notes = state.notes.filter((n) => n.id !== el.dataset.id);
-    ui.activeNote = null;
-    commit('Note deleted');
+    askConfirm('Delete this note?', 'Delete', () => {
+      state.notes = state.notes.filter((n) => n.id !== el.dataset.id);
+      ui.activeNote = null;
+      commit('Note deleted');
+    });
   },
   'note-list-tasks': (el) => { ui.taskF = { ...ui.taskF, list: el.dataset.list, status: 'open' }; location.hash = 'tasks'; },
 
@@ -937,21 +972,24 @@ const ACTIONS = {
   'edit-habit': (el) => openHabitModal(el.dataset.id),
   'delete-habit': (el) => {
     const h = habitById(el.dataset.id);
-    if (!confirm(`Delete habit “${h.name}” and its history?`)) return;
-    state.habits = state.habits.filter((x) => x !== h);
-    commit('Habit deleted');
+    askConfirm(`Delete habit “${h.name}” and its history?`, 'Delete', () => {
+      state.habits = state.habits.filter((x) => x !== h);
+      commit('Habit deleted');
+    });
   },
   'enable-notify': async () => {
-    const p = await Notification.requestPermission();
+    let p = 'denied';
+    try { p = await Notification.requestPermission(); } catch (_) { /* blocked when embedded */ }
     toast(p === 'granted' ? 'Reminders will pop up as notifications' : 'Reminders will show inside Daybook');
     render();
   },
   'new-goal': () => openGoalModal(null),
   'edit-goal': (el) => openGoalModal(el.dataset.id),
   'delete-goal': (el) => {
-    if (!confirm('Delete this goal?')) return;
-    state.goals = state.goals.filter((g) => g.id !== el.dataset.id);
-    commit();
+    askConfirm('Delete this goal?', 'Delete', () => {
+      state.goals = state.goals.filter((g) => g.id !== el.dataset.id);
+      commit('Goal deleted');
+    });
   },
   'goal-step': (el) => {
     const g = goalById(el.dataset.id);
@@ -981,28 +1019,37 @@ const ACTIONS = {
   'add-list': () => addList($('[data-new-list]').value),
   'delete-list': (el) => {
     const l = listById(el.dataset.id);
-    if (state.lists.length < 2 || !confirm(`Delete list “${l.name}”? Its tasks move to another list.`)) return;
-    state.lists = state.lists.filter((x) => x !== l);
-    const fallback = state.lists[0].id;
-    state.tasks.forEach((t) => { if (t.listId === l.id) t.listId = fallback; });
-    state.notes.forEach((n) => { if (n.listId === l.id) n.listId = ''; });
-    if (ui.taskF.list === l.id) ui.taskF.list = 'all';
-    commit('List deleted');
+    if (state.lists.length < 2) return;
+    askConfirm(`Delete list “${l.name}”? Its tasks move to another list.`, 'Delete', () => {
+      state.lists = state.lists.filter((x) => x !== l);
+      const fallback = state.lists[0].id;
+      state.tasks.forEach((t) => { if (t.listId === l.id) t.listId = fallback; });
+      state.notes.forEach((n) => { if (n.listId === l.id) n.listId = ''; });
+      if (ui.taskF.list === l.id) ui.taskF.list = 'all';
+      commit('List deleted');
+    });
   },
-  export: () => {
-    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+  export: async () => {
+    const data = JSON.stringify(state, null, 2), filename = `daybook-backup-${todayStr()}.json`;
+    const dl = window.claude?.use ? await window.claude.use('downloads') : null;
+    if (dl) {
+      try { await dl.save({ filename, data }); } catch (e) { if (e?.code !== 'declined') toast('Export is unavailable here'); }
+      return;
+    }
+    const blob = new Blob([data], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `daybook-backup-${todayStr()}.json`;
+    a.download = filename;
     a.click();
     URL.revokeObjectURL(a.href);
   },
   reset: () => {
-    if (!confirm('Replace everything with the demo data? Your passcode is kept.')) return;
-    const pin = state.passcode;
-    state = seed();
-    state.passcode = pin;
-    commit('Demo data restored');
+    askConfirm('Delete all tasks, notes, habits, goals and reviews? This cannot be undone. Your passcode and settings are kept.', 'Delete everything', () => {
+      state = { ...emptyState(), passcode: state.passcode, settings: state.settings };
+      ui.activeNote = null;
+      ui.taskF.list = 'all';
+      commit('All data deleted');
+    });
   },
 };
 
@@ -1117,6 +1164,8 @@ document.addEventListener('change', (e) => {
     const n = state.notes.find((x) => x.id === ui.activeNote);
     n.listId = t.value; n.updatedAt = Date.now();
     save(); render();
+  } else if (t.hasAttribute('data-timer-task')) {
+    ui.timer.taskId = t.value;
   } else if (t.hasAttribute('data-note-listfilter')) {
     ui.noteList = t.value; ui.activeNote = null; render();
   } else if (t.dataset.listName) {
@@ -1146,7 +1195,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.target.dataset.quickadd) {
     const title = e.target.value.trim();
     if (!title) return;
-    state.tasks.push({ id: uid(), title, listId: state.lists[0].id, priority: 'none', due: todayStr(), done: false, doneAt: null, notes: '', subtasks: [], block: null, createdAt: Date.now() });
+    state.tasks.push({ id: uid(), title, listId: state.lists[0].id, priority: 'none', due: todayStr(), done: false, doneAt: null, notes: '', subtasks: [], block: null, repeat: 'none', createdAt: Date.now() });
     save(); render();
     $('[data-quickadd]')?.focus();
   }
@@ -1278,6 +1327,140 @@ setInterval(() => {
   if (ui.locked && !ui.pin) renderLock();
 }, 20000);
 
+/* ---------- Focus timer ---------- */
+function timerText() { const s = Math.max(0, ui.timer.left); return `${pad(Math.floor(s / 60))}:${pad(s % 60)}`; }
+function chime() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    [660, 880, 990].forEach((f, i) => {
+      const o = ctx.createOscillator(), g = ctx.createGain(), t = ctx.currentTime + i * 0.22;
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.2, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+      o.connect(g).connect(ctx.destination);
+      o.start(t); o.stop(t + 0.22);
+    });
+  } catch (_) { /* no audio */ }
+}
+function finishTimer() {
+  const tm = ui.timer;
+  tm.running = false;
+  let next = 'focus', msg = 'Break over. Ready to focus?';
+  if (tm.mode === 'focus') {
+    state.pomodoros.push({ at: Date.now(), min: TIMER_MODES.focus[1], taskId: tm.taskId || null });
+    save();
+    const n = state.pomodoros.filter((p) => ymd(new Date(p.at)) === todayStr()).length;
+    next = n % 4 === 0 ? 'long' : 'short';
+    msg = `Focus session done. Time for a ${next === 'long' ? 'long' : 'short'} break.`;
+  }
+  Object.assign(tm, { mode: next, left: TIMER_MODES[next][1] * 60 });
+  chime();
+  try { if (Notification.permission === 'granted') new Notification('Daybook', { body: msg }); } catch (_) { /* unavailable */ }
+  toast(msg);
+  safeRender();
+}
+setInterval(() => {
+  const tm = ui.timer;
+  if (tm.running) {
+    tm.left = Math.max(0, Math.ceil((tm.endAt - Date.now()) / 1000));
+    if (tm.left === 0) finishTimer();
+  }
+  const disp = $('#timer-display');
+  if (disp) {
+    disp.textContent = timerText();
+    $('#timer-bar').style.width = `${(1 - tm.left / (TIMER_MODES[tm.mode][1] * 60)) * 100}%`;
+  }
+  document.title = tm.running ? `${timerText()} · ${TIMER_MODES[tm.mode][0]}` : 'Daybook';
+}, 1000);
+
+/* ---------- Deferred rendering ----------
+   Remote updates and timer events shouldn't wipe out whatever the person is typing,
+   so they re-render only once nothing is being edited. */
+let renderPending = false;
+function isEditing() {
+  const a = document.activeElement;
+  return !!$('#modal-root').firstChild || !!(a && a !== document.body && a.matches('input:not([type=checkbox]), textarea, select'));
+}
+function safeRender() { if (isEditing()) renderPending = true; else render(); }
+function flushRender() { if (renderPending && !isEditing()) { renderPending = false; render(); } }
+document.addEventListener('focusout', () => setTimeout(flushRender, 0));
+
+/* ---------- Sync ----------
+   When Daybook runs as a hosted claude.ai page, the whole state is mirrored to one private
+   document in the page's store, so every device signed in to the same account sees the same data.
+   Opened as a local file there is no store, and localStorage is the only copy. */
+const sync = { ref: null, ready: false, lastJson: '', timer: 0, writing: false, again: false, status: 'local' };
+const SYNC_LABEL = {
+  local: 'Saved on this device', connecting: 'Connecting…', saving: 'Saving…', synced: 'Synced to your account',
+  error: 'Sync paused. Saved on this device.', readonly: 'Read-only: changes are not saved', full: 'Too much data to sync',
+};
+function setSync(status) {
+  sync.status = status;
+  const el = $('#sync-status');
+  if (el) { el.textContent = SYNC_LABEL[status]; el.dataset.status = status; }
+}
+function queuePush() {
+  if (!sync.ref || !sync.ready) return;
+  setSync('saving');
+  clearTimeout(sync.timer);
+  sync.timer = setTimeout(pushNow, 600);
+}
+async function pushNow() {
+  sync.timer = 0;
+  if (sync.writing) { sync.again = true; return; }
+  const json = JSON.stringify(state);
+  if (json === sync.lastJson) { setSync('synced'); return; }
+  if (json.length > 250000) { setSync('full'); return; }
+  sync.writing = true;
+  sync.lastJson = json;
+  try {
+    await sync.ref.set({ json, savedAt: Date.now() });
+    setSync('synced');
+  } catch (e) {
+    sync.lastJson = '';
+    setSync(e?.code === 'invalid_argument' ? 'readonly' : 'error');
+  } finally {
+    sync.writing = false;
+    if (sync.again) { sync.again = false; pushNow(); }
+  }
+}
+function applyRemote(json) {
+  // A local edit still waiting to be sent wins; it will overwrite the remote copy in a moment.
+  if (sync.timer || sync.writing) return;
+  try {
+    const next = normalize(JSON.parse(json));
+    sync.lastJson = json;
+    state = next;
+    try { localStorage.setItem(STORE, json); } catch (_) { /* ignore */ }
+    setSync('synced');
+    if (ui.locked) renderLock();
+    safeRender();
+  } catch (_) { setSync('error'); }
+}
+async function initSync() {
+  if (!window.claude?.use) return;
+  setSync('connecting');
+  const [user, db] = await Promise.all([window.claude.use('user'), window.claude.use('db')]);
+  const id = user ? await user.id() : null;
+  if (!db || !id) { setSync('local'); return; }
+  sync.ref = db.doc(`data/users/${id}/daybook`);
+  sync.ref.onSnapshot((snap) => {
+    if (snap.metadata.hasPendingWrites) return;
+    if (!snap.exists) {
+      // Only a server-confirmed "nothing saved yet" means this is the first device: upload what's here.
+      if (!snap.metadata.fromCache && !sync.ready) { sync.ready = true; pushNow(); }
+      return;
+    }
+    sync.ready = true;
+    const { json } = snap.data();
+    if (json === sync.lastJson) setSync('synced');
+    else applyRemote(json);
+  }, () => setSync('error'));
+}
+
 /* ---------- Boot ---------- */
 render();
 renderLock();
+setSync('local');
+initSync();
