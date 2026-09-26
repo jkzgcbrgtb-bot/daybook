@@ -1,0 +1,11 @@
+{
+  "name": "daybook",
+  "version": "0.1.0",
+  "description": "Read and update your Daybook planner (tasks, calendar, notes, habits, goals) and work ahead on tasks by drafting prep work for your review.",
+  "author": {
+    "name": "Daybook"
+  },
+  "homepage": "https://jkzgcbrgtb-bot.github.io/daybook/",
+  "repository": "https://github.com/jkzgcbrgtb-bot/daybook",
+  "keywords": ["planner", "tasks", "calendar", "productivity"]
+}
