@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Daybook</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app" id="app">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">✓</span> Daybook</div>
+      <nav class="nav" id="nav"></nav>
+      <button class="btn ghost lock-btn" data-action="lock" title="Lock Daybook">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+        Lock
+      </button>
+    </aside>
+    <div>
+      <header class="topbar">
+        <button class="btn icon ghost" data-action="toggle-nav" aria-label="Menu">☰</button>
+        <b>Daybook</b>
+        <span class="spacer"></span>
+        <button class="btn icon ghost" data-action="lock" aria-label="Lock">🔒</button>
+      </header>
+      <main class="main" id="main"></main>
+    </div>
+  </div>
+
+  <div class="lock hidden" id="lock"></div>
+  <div id="modal-root"></div>
+  <div class="toast-wrap" id="toasts"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
