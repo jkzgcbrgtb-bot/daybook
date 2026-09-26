@@ -14,6 +14,7 @@
   /* list colors — categorical, fixed order */
   --c1: #2a78d6; --c2: #eb6834; --c3: #1baf7a; --c4: #eda100;
   --c5: #e87ba4; --c6: #008300; --c7: #4a3aa7; --c8: #e34948;
+  --c9: #0891b2; --c10: #8b5e34; --c11: #5b6b86; --c12: #7cb518; --c0: #a3a29b;
 
   --accent: #4f46e5;
   --accent-soft: #eceafd;
@@ -42,6 +43,7 @@
     --shadow: 0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.35);
     --c1: #3987e5; --c2: #d95926; --c3: #199e70; --c4: #c98500;
     --c5: #d55181; --c6: #008300; --c7: #9085e9; --c8: #e66767;
+    --c9: #22b3d0; --c10: #b98552; --c11: #8a9ab8; --c12: #8fcc2a; --c0: #6e6d66;
   }
   :root:not([data-theme="light"])[data-accent="indigo"] { --accent: #8b85f5; --accent-soft: #2a2850; --accent-ink: #111; }
   :root:not([data-theme="light"])[data-accent="teal"]   { --accent: #3cc2b6; --accent-soft: #173633; --accent-ink: #111; }
@@ -56,6 +58,7 @@
   --shadow: 0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.35);
   --c1: #3987e5; --c2: #d95926; --c3: #199e70; --c4: #c98500;
   --c5: #d55181; --c6: #008300; --c7: #9085e9; --c8: #e66767;
+  --c9: #22b3d0; --c10: #b98552; --c11: #8a9ab8; --c12: #8fcc2a; --c0: #6e6d66;
 }
 :root[data-theme="dark"][data-accent="indigo"] { --accent: #8b85f5; --accent-soft: #2a2850; --accent-ink: #111; }
 :root[data-theme="dark"][data-accent="teal"]   { --accent: #3cc2b6; --accent-soft: #173633; --accent-ink: #111; }
@@ -397,3 +400,19 @@ details summary { cursor: pointer; font-weight: 500; }
 .day-pick input:checked + span { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .day-pick input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (max-width: 800px) { .picks { grid-template-columns: minmax(0, 1fr); } }
+
+/* ---------- Color categories ---------- */
+.task { border-left: 3px solid var(--lc, transparent); padding-left: 10px; }
+.catchup .task { border-left: 0; padding-left: 4px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px; margin: -8px 0 14px; }
+.list-edit { padding: 8px 10px; border: 1px solid var(--border); border-left: 4px solid var(--lc); border-radius: 10px; }
+.list-edit .row .input { min-width: 0; }
+.kw-input { margin-top: 6px; height: 32px; font-size: 13px; color: var(--text-2); }
+.swatch-btn { width: 28px; height: 28px; flex: none; border-radius: 50%; border: 0; background: var(--lc); cursor: pointer; box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--border); }
+.swatch-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.color-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 8px; }
+.color-pick { display: grid; grid-template-columns: 22px 1fr; column-gap: 8px; align-items: center; text-align: left; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); cursor: pointer; }
+.color-pick span { grid-row: span 2; width: 22px; height: 22px; border-radius: 50%; background: var(--pc); }
+.color-pick small { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.color-pick.on { border-color: var(--text); box-shadow: inset 0 0 0 1px var(--text); }
+.color-pick:hover { background: var(--surface-2); }
