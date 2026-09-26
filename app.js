@@ -47,6 +47,7 @@ const ICONS = {
   left: svg('<path d="m15 18-6-6 6-6"/>'),
   right: svg('<path d="m9 18 6-6-6-6"/>'),
   grip: svg('<circle cx="9" cy="6" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="18" r="1"/>'),
+  bolt: svg('<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>'),
   bell: svg('<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/>'),
 };
 
@@ -80,6 +81,7 @@ function emptyState() {
       theme: 'system', density: 'comfortable', accent: 'indigo',
       sections: Object.keys(SECTIONS).map((id) => ({ id, visible: true })),
       hiddenNav: [],
+      dayStart: '08:00', dayEnd: '22:00',
     },
     focus: {},
     lists: [{ id: 'l-inbox', name: 'Inbox', color: 1 }],
@@ -89,6 +91,7 @@ function emptyState() {
     goals: [],
     reviews: {},
     pomodoros: [],
+    busy: [],
   };
 }
 
@@ -103,7 +106,7 @@ function load() {
 function normalize(s) {
   const base = emptyState();
   const out = { ...base, ...s, settings: { ...base.settings, ...(s.settings || {}) } };
-  for (const k of ['lists', 'tasks', 'notes', 'habits', 'goals', 'pomodoros']) if (!Array.isArray(out[k])) out[k] = [];
+  for (const k of ['lists', 'tasks', 'notes', 'habits', 'goals', 'pomodoros', 'busy']) if (!Array.isArray(out[k])) out[k] = [];
   if (!out.lists.length) out.lists = base.lists;
   const known = new Set(out.settings.sections.map((x) => x.id));
   Object.keys(SECTIONS).forEach((id) => {
@@ -130,6 +133,7 @@ const ui = {
   taskF: { q: '', list: 'all', prio: 'all', due: 'all', status: 'open' },
   noteQ: '', noteList: 'all', activeNote: null,
   hoursRange: 'week',
+  placing: null, skipClick: false, showKey: false,
   reminded: {},
   timer: { mode: 'focus', left: TIMER_MODES.focus[1] * 60, running: false, endAt: 0, taskId: '' },
 };
@@ -202,6 +206,149 @@ function spawnNext(t) {
   return copy;
 }
 
+/* ---------- Scheduling ---------- */
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const taskDur = (t) => t.block?.dur || t.est || 60;
+const fmtDur = (m) => (m < 60 ? `${m} min` : m % 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m / 60} h`);
+const busyOn = (ds) => { const wd = parse(ds).getDay(); return state.busy.filter((b) => b.days.includes(wd)); };
+function occupied(ds, excludeId) {
+  return [
+    ...state.tasks.filter((t) => t.block && t.block.date === ds && t.id !== excludeId).map((t) => ({ start: t.block.start, end: t.block.start + t.block.dur })),
+    ...busyOn(ds).map((b) => ({ start: b.start, end: b.end })),
+  ].sort((a, b) => a.start - b.start);
+}
+// The first gap of `dur` minutes within the day's hours, at or after fromDate/fromMin, never in the past.
+function findSlot(dur, fromDate = todayStr(), fromMin = 0, { excludeId, days = 14 } = {}) {
+  const dayStart = fromHHMM(state.settings.dayStart), dayEnd = fromHHMM(state.settings.dayEnd);
+  const T = todayStr();
+  if (fromDate < T) { fromDate = T; fromMin = 0; }
+  for (let i = 0; i < days; i++) {
+    const ds = ymd(addDays(parse(fromDate), i));
+    let start = Math.max(dayStart, i === 0 ? fromMin : 0, ds === T ? nowMinutes() : 0);
+    start = Math.ceil(start / 15) * 15;
+    for (const o of occupied(ds, excludeId)) {
+      if (o.end <= start) continue;
+      if (o.start - start >= dur) break;
+      start = Math.ceil(o.end / 15) * 15;
+    }
+    if (start + dur <= dayEnd) return { date: ds, start };
+  }
+  return null;
+}
+const slotLabel = (slot) => `${slot.date === todayStr() ? 'Today' : fmtDate(slot.date, { weekday: 'short', month: 'short', day: 'numeric' })} at ${fmtTime(slot.start)}`;
+// Schedules a task into the first free slot, with an Undo toast. Returns false if nothing fits.
+function autoSchedule(t, fromDate, fromMin, { sameDay = false, quiet = false } = {}) {
+  const dur = taskDur(t);
+  const slot = findSlot(dur, fromDate, fromMin, { excludeId: t.id, days: sameDay ? 1 : 14 });
+  if (!slot) {
+    if (!quiet) toast(sameDay ? 'No free time left that day' : `No free ${fmtDur(dur)} gap in the next 2 weeks`);
+    return false;
+  }
+  const undo = quiet ? null : snapshot();
+  t.block = { date: slot.date, start: slot.start, dur };
+  if (!quiet) { closeModal(); save(); render(); toast(`Scheduled ${slotLabel(slot)}`, undo); }
+  return true;
+}
+
+/* Plain-English quick add: "Essay fri 3pm 2h #school !high every week" */
+const WD_RE = '([Ss]un(?:day)?|[Mm]on(?:day)?|[Tt]ue(?:s(?:day)?)?|[Ww]ed(?:nesday)?|[Tt]hu(?:r(?:s(?:day)?)?)?|[Ff]ri(?:day)?|[Ss]at(?:urday)?)';
+const MONTH_RE = '(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?';
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+function nextWeekday(name) {
+  const target = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'].indexOf(name.slice(0, 3).toLowerCase());
+  const d = new Date();
+  return ymd(addDays(d, (target - d.getDay() + 7) % 7));
+}
+function futureDate(month, day, year) {
+  const now = new Date();
+  let d = new Date(year ?? now.getFullYear(), month, day);
+  if (year == null && ymd(d) < todayStr()) d = new Date(now.getFullYear() + 1, month, day);
+  return d.getMonth() === month ? ymd(d) : null;
+}
+function parseQuick(input) {
+  let s = ` ${input} `;
+  const out = { priority: 'none', repeat: 'none', listId: null, est: null, date: null, time: null };
+  const take = (re, fn) => { s = s.replace(re, (...m) => (fn(...m) === false ? m[0] : ' ')); };
+  const PRIO = { h: 'high', high: 'high', m: 'med', med: 'med', medium: 'med', l: 'low', low: 'low' };
+  take(/\s!(high|h|medium|med|m|low|l)(?=\s)/i, (_, p) => { out.priority = PRIO[p.toLowerCase()]; });
+  take(/\s#([\w-]+)(?=\s)/, (_, name) => {
+    const l = state.lists.find((x) => x.name.toLowerCase().replace(/\s+/g, '').startsWith(name.toLowerCase()));
+    if (!l) return false;
+    out.listId = l.id;
+  });
+  take(/\s(?:every\s+day|daily)(?=\s)/i, () => { out.repeat = 'daily'; });
+  take(/\s(?:every\s+weekday|weekdays)(?=\s)/i, () => { out.repeat = 'weekdays'; });
+  take(/\s(?:every\s+month|monthly)(?=\s)/i, () => { out.repeat = 'monthly'; });
+  take(new RegExp(`\\severy\\s+${WD_RE}(?=\\s)`, 'i'), (_, d) => { out.repeat = 'weekly'; out.date = nextWeekday(d); });
+  take(/\s(?:every\s+week|weekly)(?=\s)/i, () => { out.repeat = 'weekly'; });
+  take(/\s(?:for\s+)?(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hours?)(?:\s*(\d+)\s*(?:m|min|mins|minutes?))?(?=\s)/i, (_, h, m) => { out.est = Math.round(parseFloat(h) * 60 + (+m || 0)); });
+  take(/\s(?:for\s+)?(\d+)\s*(?:m|min|mins|minutes?)(?=\s)/i, (_, m) => { out.est = +m; });
+  take(/\s(?:at\s+|@)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|a|p)(?=\s)/i, (_, h, m, ap) => {
+    if (+h > 12 || +m > 59) return false;
+    out.time = ((+h % 12) + (/p/i.test(ap) ? 12 : 0)) * 60 + (+m || 0);
+  });
+  take(/\s(?:at\s+|@)?([01]?\d|2[0-3]):([0-5]\d)(?=\s)/, (_, h, m) => { out.time = +h * 60 + +m; });
+  take(/\s(?:at|@)\s*(\d{1,2})(?=\s)/i, (_, h) => {
+    if (+h < 1 || +h > 12) return false;
+    out.time = (+h <= 7 ? +h + 12 : +h) * 60; // "at 4" means 4 PM; "at 9" means 9 AM
+  });
+  take(/\s(?:at\s+)?(?:noon|midday)(?=\s)/i, () => { out.time = 720; });
+  take(/\stonight(?=\s)/i, () => { out.date = out.date || todayStr(); if (out.time == null) out.time = 1140; });
+  take(/\s(?:this\s+|in\s+the\s+)?(morning|afternoon|evening)(?=\s)/i, (_, p) => { if (out.time == null) out.time = { morning: 540, afternoon: 840, evening: 1080 }[p.toLowerCase()]; });
+  take(/\s(?:due\s+|on\s+|by\s+)?today(?=\s)/i, () => { out.date = todayStr(); });
+  take(/\s(?:due\s+|on\s+|by\s+)?(?:tomorrow|tmrw|tmr)(?=\s)/i, () => { out.date = ymd(addDays(new Date(), 1)); });
+  take(/\snext\s+week(?=\s)/i, () => { out.date = ymd(addDays(startOfWeek(new Date()), 7)); });
+  take(/\sin\s+(\d+)\s+(days?|weeks?)(?=\s)/i, (_, n, u) => { out.date = ymd(addDays(new Date(), +n * (/w/i.test(u) ? 7 : 1))); });
+  take(new RegExp(`\\s(?:due\\s+|on\\s+|by\\s+)?(?:next\\s+)?${WD_RE}(?=\\s)`), (m, d) => {
+    out.date = nextWeekday(d);
+    if (/next/.test(m) && out.date <= ymd(addDays(new Date(), 6))) out.date = ymd(addDays(parse(out.date), out.date === todayStr() ? 7 : 0));
+  });
+  take(new RegExp(`\\s(?:due\\s+|on\\s+|by\\s+)?${MONTH_RE}\\s+(\\d{1,2})(?:st|nd|rd|th)?(?=\\s)`, 'i'), (_, mo, d) => { const x = futureDate(MONTHS.indexOf(mo.toLowerCase()), +d); if (!x) return false; out.date = x; });
+  take(new RegExp(`\\s(?:due\\s+|on\\s+|by\\s+)?(\\d{1,2})(?:st|nd|rd|th)?\\s+${MONTH_RE}(?=\\s)`, 'i'), (_, d, mo) => { const x = futureDate(MONTHS.indexOf(mo.toLowerCase()), +d); if (!x) return false; out.date = x; });
+  take(/\s(?:due\s+|on\s+|by\s+)?(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?=\s)/, (_, mo, d, y) => {
+    const x = futureDate(+mo - 1, +d, y ? (y.length === 2 ? 2000 + +y : +y) : null);
+    if (!x) return false;
+    out.date = x;
+  });
+  let title = s.replace(/\s+/g, ' ').trim().replace(/\s+(at|on|by|for|due)$/i, '');
+  if (!title) title = input.trim();
+  const date = out.date || (out.time != null ? todayStr() : null);
+  return {
+    title, priority: out.priority, repeat: out.repeat, listId: out.listId, est: out.est, due: date,
+    block: out.time != null ? { date, start: out.time, dur: out.est || 60 } : null,
+  };
+}
+function quickPreview(p) {
+  const bits = [];
+  if (p.block) bits.push(`${ICONS.clock}${slotLabel(p.block)}`);
+  else if (p.due) bits.push(`Due ${p.due === todayStr() ? 'today' : fmtDate(p.due, { weekday: 'short', month: 'short', day: 'numeric' })}`);
+  if (p.est) bits.push(`~${fmtDur(p.est)}`);
+  if (p.listId) bits.push(`<span class="dot" style="background:${listColor(p.listId)}"></span>${esc(listById(p.listId).name)}`);
+  if (p.priority !== 'none') bits.push(`${PRIORITY[p.priority]} priority`);
+  if (p.repeat !== 'none') bits.push(`↻ ${REPEAT_SHORT[p.repeat]}`);
+  return bits.map((b) => `<span class="chip">${b}</span>`).join('');
+}
+const quickHint = () => `Try: essay fri 3pm 2h #${state.lists[0].name.toLowerCase().split(' ')[0]} !high`;
+function quickAddHtml(where, placeholder) {
+  return `<div class="quick-add"><input class="input" data-quickadd="${where}" placeholder="${placeholder}" aria-label="Quick add task">
+    <div class="qa-preview" data-qa-preview><span class="muted small">${esc(quickHint())}</span></div></div>`;
+}
+function quickAdd(input) {
+  const raw = input.value.trim();
+  if (!raw) return;
+  const p = parseQuick(raw);
+  const where = input.dataset.quickadd;
+  const listId = p.listId || (where === 'tasks' && ui.taskF.list !== 'all' ? ui.taskF.list : state.lists[0].id);
+  const due = p.due || (where === 'today' ? todayStr() : null);
+  state.tasks.push({
+    id: uid(), title: p.title, listId, priority: p.priority, due, done: false, doneAt: null, notes: '', subtasks: [],
+    block: p.block, est: p.est, repeat: p.repeat !== 'none' && !due && !p.block ? 'none' : p.repeat, createdAt: Date.now(),
+  });
+  save(); render();
+  toast(p.block ? `Added and scheduled ${slotLabel(p.block)}` : 'Task added');
+  $(`[data-quickadd="${where}"]`)?.focus();
+}
+
 /* =========================================================
    Rendering
    ========================================================= */
@@ -245,6 +392,7 @@ function taskRow(t) {
   if (t.priority !== 'none') meta.push(`<span class="chip ${t.priority === 'high' ? 'prio-high' : ''}">${PRIORITY[t.priority]} priority</span>`);
   if (t.due) meta.push(`<span class="chip ${!t.done && t.due < todayStr() ? 'overdue' : ''}">${dueLabel(t.due, t.done)}</span>`);
   if (t.block) meta.push(`<span class="chip">${ICONS.clock}${fmtDate(t.block.date)} · ${fmtTime(t.block.start)}</span>`);
+  else if (t.est) meta.push(`<span class="chip">~${fmtDur(t.est)}</span>`);
   if (t.repeat && t.repeat !== 'none') meta.push(`<span class="chip">↻ ${REPEAT_SHORT[t.repeat]}</span>`);
   if (t.subtasks.length) meta.push(`<span class="chip">${t.subtasks.filter((s) => s.done).length}/${t.subtasks.length} subtasks</span>`);
   const subs = t.subtasks.length ? `<ul class="subtasks">${t.subtasks.map((s) => `
@@ -256,6 +404,7 @@ function taskRow(t) {
       <div class="task-meta">${meta.join('')}</div>${subs}
     </div>
     <div class="task-actions">
+      ${!t.done && !t.block ? `<button class="btn icon ghost sm" data-action="next-slot" data-id="${t.id}" aria-label="Schedule in next free slot" data-tip="Schedule in next free slot">${ICONS.bolt}</button>` : ''}
       <button class="btn icon ghost sm" data-action="edit-task" data-id="${t.id}" aria-label="Edit">${ICONS.edit}</button>
       <button class="btn icon ghost sm" data-action="delete-task" data-id="${t.id}" aria-label="Delete">${ICONS.trash}</button>
     </div>
@@ -297,10 +446,17 @@ const TODAY_SECTIONS = {
   },
   schedule() {
     const T = todayStr(), now = nowMinutes();
-    const items = state.tasks.filter((t) => t.block && t.block.date === T).sort((a, b) => a.block.start - b.block.start);
+    const items = [
+      ...state.tasks.filter((t) => t.block && t.block.date === T),
+      ...busyOn(T).map((b) => ({ busy: b, block: { start: b.start, dur: b.end - b.start } })),
+    ].sort((a, b) => a.block.start - b.block.start);
     const body = items.length ? `<div class="sched">${items.map((t) => {
       const { start, dur } = t.block;
       const isNow = now >= start && now < start + dur;
+      if (t.busy) {
+        return `<div class="sched-item busy ${isNow ? 'now' : ''}" data-action="edit-busy" data-id="${t.busy.id}">
+          <span class="time">${fmtTime(start)}<br><span class="muted">${fmtTime(start + dur)}</span></span><span class="title">${esc(t.busy.title)}</span></div>`;
+      }
       return `<div class="sched-item ${t.done ? 'done' : ''} ${isNow ? 'now' : ''}" style="border-left-color:${listColor(t.listId)}" data-action="edit-task" data-id="${t.id}">
         <span class="time">${fmtTime(start)}<br><span class="muted">${fmtTime(start + dur)}</span></span><span class="title">${esc(t.title)}${isNow ? ' <span class="chip">Now</span>' : ''}</span></div>`;
     }).join('')}</div>` : `<div class="empty">Nothing time-blocked yet. Drag tasks onto the calendar.</div>`;
@@ -312,7 +468,7 @@ const TODAY_SECTIONS = {
     const open = items.filter((t) => !t.done).length;
     return `<section class="card"><div class="card-head"><h2>Due today</h2><span class="chip">${open} open</span></div>
       ${items.length ? items.map(taskRow).join('') : '<div class="empty">Nothing due today.</div>'}
-      <input class="input" style="margin-top:10px" data-quickadd="today" placeholder="Add a task due today, press Enter" aria-label="Quick add task"></section>`;
+      ${quickAddHtml('today', 'Add a task, press Enter')}</section>`;
   },
   habits() {
     const T = todayStr();
@@ -329,10 +485,24 @@ const TODAY_SECTIONS = {
       ${state.goals.length ? state.goals.map(goalBar).join('') : '<div class="empty">No goals yet.</div>'}</section>`;
   },
 };
+const missedTasks = () => state.tasks.filter((t) => !t.done && t.block && t.block.date < todayStr());
+function catchUpCard() {
+  const missed = missedTasks().sort(taskSort);
+  if (!missed.length) return '';
+  return `<section class="card catchup span-2">
+    <div class="card-head"><h2>Not finished yet</h2><span class="muted small">${missed.length} time block${missed.length === 1 ? '' : 's'} from earlier days</span></div>
+    ${missed.map((t) => `<div class="task"><span class="dot" style="background:${listColor(t.listId)};margin-top:6px"></span>
+      <div class="task-body"><div class="task-title" data-action="edit-task" data-id="${t.id}">${esc(t.title)}</div>
+      <div class="task-meta"><span class="chip overdue">Was ${fmtDate(t.block.date, { weekday: 'short', month: 'short', day: 'numeric' })}, ${fmtTime(t.block.start)}</span></div></div>
+      <button class="btn sm" data-action="next-slot" data-id="${t.id}">${ICONS.bolt} Next free slot</button></div>`).join('')}
+    <div class="row" style="margin-top:10px"><button class="btn primary" data-action="catchup-all">Reschedule all</button>
+      <button class="btn" data-action="catchup-clear">Unschedule all</button></div>
+  </section>`;
+}
 function viewToday() {
   const h = new Date().getHours();
   const hello = h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
-  const secs = state.settings.sections.filter((s) => s.visible).map((s) => TODAY_SECTIONS[s.id]()).join('');
+  const secs = catchUpCard() + state.settings.sections.filter((s) => s.visible).map((s) => TODAY_SECTIONS[s.id]()).join('');
   return pageHead(hello, new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }),
     `<button class="btn primary" data-action="new-task">${ICONS.plus} New task</button>`) +
     `<div class="today-grid">${secs || '<div class="card span-2 empty">All dashboard sections are hidden. Turn them back on in Settings.</div>'}</div>`;
@@ -384,12 +554,22 @@ function timeGrid(days) {
   }).join('');
   const hours = Array.from({ length: 24 }, (_, h) => `<div>${h ? hourLabel(h) : ''}</div>`).join('');
   const colsHtml = days.map((ds) => {
-    const items = state.tasks.filter((t) => t.block && t.block.date === ds).sort((a, b) => a.block.start - b.block.start || b.block.dur - a.block.dur);
-    const blocks = layoutDay(items).map(({ t, lane, lanes }) => {
-      const { start, dur } = t.block;
+    // Tasks and recurring busy times share lanes so overlaps sit side by side.
+    const items = [
+      ...state.tasks.filter((t) => t.block && t.block.date === ds).map((t) => ({ t, block: t.block })),
+      ...busyOn(ds).map((b) => ({ busy: b, block: { start: b.start, dur: b.end - b.start } })),
+    ].sort((a, b) => a.block.start - b.block.start || b.block.dur - a.block.dur);
+    const blocks = layoutDay(items).map(({ t: item, lane, lanes }) => {
+      const { start, dur } = item.block;
+      const pos = `top:calc(var(--hour) * ${start / 60});height:calc(var(--hour) * ${dur / 60} - 2px);left:calc(${(lane / lanes) * 100}% + 3px);width:calc(${100 / lanes}% - 6px);right:auto`;
+      const time = dur >= 30 ? `<span>${fmtTime(start)} – ${fmtTime(start + dur)}</span>` : '';
+      if (item.busy) {
+        return `<div class="block busy" data-action="edit-busy" data-id="${item.busy.id}" style="${pos}" title="${esc(item.busy.title)}"><b>${esc(item.busy.title)}</b>${time}</div>`;
+      }
+      const t = item.t;
       return `<div class="block ${t.done ? 'done' : ''}" draggable="true" data-drag="${t.id}" data-action="edit-task" data-id="${t.id}"
-        style="--bc:${listColor(t.listId)};top:calc(var(--hour) * ${start / 60});height:calc(var(--hour) * ${dur / 60} - 2px);left:calc(${(lane / lanes) * 100}% + 3px);width:calc(${100 / lanes}% - 6px);right:auto"
-        title="${esc(t.title)}"><b>${esc(t.title)}</b>${dur >= 30 ? `<span>${fmtTime(start)} – ${fmtTime(start + dur)}</span>` : ''}</div>`;
+        style="--bc:${listColor(t.listId)};${pos}" title="${esc(t.title)}"><b>${esc(t.title)}</b>${time}
+        <span class="resize" data-resize="${t.id}" aria-hidden="true"></span></div>`;
     }).join('');
     const nowLine = ds === T ? `<div class="now-line" style="top:calc(var(--hour) * ${nowMinutes() / 60})"></div>` : '';
     return `<div class="day-col ${ds === T ? 'is-today' : ''}" data-day="${ds}" data-action="slot" style="height:calc(var(--hour) * 24)">${blocks}${nowLine}</div>`;
@@ -420,19 +600,26 @@ function viewCalendar() {
   const unscheduled = state.tasks.filter((t) => !t.done && !t.block).sort(taskSort);
   const tray = `<aside class="card tray" data-drop="tray">
     <div class="card-head"><h2>Unscheduled</h2><span class="chip">${unscheduled.length}</span></div>
-    <p class="muted small" style="margin:0 0 10px">Drag a task onto the calendar to time-block it, or tap Schedule. Drop a block here to unschedule it.</p>
+    <p class="muted small" style="margin:0 0 10px">Drag a task onto the calendar, or use Schedule. Drop a block here to unschedule it.</p>
+    <div style="margin-bottom:10px">${quickAddHtml('tray', 'New task, press Enter')}</div>
     ${unscheduled.map((t) => `<div class="tray-item" draggable="true" data-drag="${t.id}" style="border-left-color:${listColor(t.listId)}">
       <div class="task-title" data-action="edit-task" data-id="${t.id}">${esc(t.title)}</div>
       <div class="row">${t.due ? `<span class="chip ${t.due < todayStr() ? 'overdue' : ''}">${dueLabel(t.due)}</span>` : ''}${t.priority === 'high' ? '<span class="chip prio-high">High</span>' : ''}
-      <span class="spacer"></span><button class="btn sm" data-action="schedule-task" data-id="${t.id}">Schedule</button></div></div>`).join('') || '<div class="empty">Everything is scheduled.</div>'}
+      ${t.est ? `<span class="chip">~${fmtDur(t.est)}</span>` : ''}
+      <span class="spacer"></span>
+      <button class="btn sm icon" data-action="next-slot" data-id="${t.id}" aria-label="Next free slot" data-tip="Next free slot">${ICONS.bolt}</button>
+      <button class="btn sm" data-action="schedule-task" data-id="${t.id}">Schedule</button></div></div>`).join('') || '<div class="empty">Everything is scheduled.</div>'}
   </aside>`;
   const seg = ['day', 'week', 'month'].map((v) => `<button class="${ui.calView === v ? 'on' : ''}" data-action="cal-view" data-view="${v}">${v[0].toUpperCase() + v.slice(1)}</button>`).join('');
   const toolbar = `<button class="btn icon" data-action="cal-step" data-dir="-1" aria-label="Previous">${ICONS.left}</button>
     <button class="btn" data-action="cal-today">Today</button>
     <button class="btn icon" data-action="cal-step" data-dir="1" aria-label="Next">${ICONS.right}</button>
     <div class="seg">${seg}</div>`;
-  return pageHead('Calendar', calTitle(), toolbar) +
-    `<div class="cal-layout">${tray}<div>${ui.calView === 'month' ? monthGrid() : timeGrid(calDays())}</div></div>`;
+  const placing = ui.placing && taskById(ui.placing);
+  const banner = placing ? `<div class="place-banner" role="status"><span>Tap a time on the calendar for <b>${esc(placing.title)}</b> (${fmtDur(taskDur(placing))})</span>
+    <button class="btn sm" data-action="place-cancel">Cancel</button></div>` : '';
+  return pageHead('Calendar', calTitle(), toolbar) + banner +
+    `<div class="cal-layout ${placing ? 'placing' : ''}">${tray}<div>${ui.calView === 'month' ? monthGrid() : timeGrid(calDays())}</div></div>`;
 }
 function afterCalendar() {
   const sc = $('#cal-scroll');
@@ -475,7 +662,8 @@ function viewTasks() {
     ${sel('status', [['open', 'Open'], ['done', 'Completed'], ['all', 'All']])}
   </div>`;
   return pageHead('Tasks', `${state.tasks.filter((t) => !t.done).length} open across ${state.lists.length} lists`,
-    `<button class="btn primary" data-action="new-task">${ICONS.plus} New task</button>`) + filters + `<div id="task-list">${taskListHtml()}</div>`;
+    `<button class="btn primary" data-action="new-task">${ICONS.plus} New task</button>`) +
+    `<div class="card" style="margin-bottom:14px">${quickAddHtml('tasks', 'Add a task, press Enter')}</div>` + filters + `<div id="task-list">${taskListHtml()}</div>`;
 }
 
 /* ---------- Notes ---------- */
@@ -692,6 +880,20 @@ function viewSettings() {
 
     ${syncCard()}
 
+    <section class="card"><h2>Schedule</h2>
+      ${row('Day hours', 'Next free slot and Reschedule only use this window.', `<div class="row">
+        <input class="input" type="time" step="900" id="day-start" data-setting="dayStart" value="${s.dayStart}" aria-label="Day starts" style="width:auto">
+        <span class="muted">to</span>
+        <input class="input" type="time" step="900" id="day-end" data-setting="dayEnd" value="${s.dayEnd}" aria-label="Day ends" style="width:auto"></div>`)}
+      <div class="set-row"><div class="l"><b>Busy times</b><span>Your class timetable or anything that repeats each week. Nothing gets scheduled on top of these.</span></div>
+        <button class="btn" data-action="new-busy">${ICONS.plus} Add busy time</button></div>
+      ${state.busy.length ? `<div class="stack" style="gap:6px">${[...state.busy].sort((a, b) => a.start - b.start).map((b) => `<div class="row busy-row">
+        <b class="spacer">${esc(b.title)}</b>
+        <span class="muted small">${busyDays(b.days)} · ${fmtTime(b.start)} – ${fmtTime(b.end)}</span>
+        <button class="btn icon ghost sm" data-action="edit-busy" data-id="${b.id}" aria-label="Edit">${ICONS.edit}</button>
+        <button class="btn icon ghost sm" data-action="delete-busy" data-id="${b.id}" aria-label="Delete">${ICONS.trash}</button></div>`).join('')}</div>` : ''}
+    </section>
+
     <section class="card"><h2>Today dashboard</h2><p class="muted small">Drag or use the arrows to reorder. Untick to hide a section.</p>
       <ul class="order-list" id="order-list">${s.sections.map((sec, i) => `<li draggable="true" data-order="${sec.id}" class="${sec.visible ? '' : 'off'}">
         <span class="grip">${ICONS.grip}</span>
@@ -744,15 +946,28 @@ function askConfirm(message, yesLabel, onYes) {
   pendingConfirm = onYes;
   setTimeout(() => $('[data-action="confirm-yes"]')?.focus(), 0);
 }
-function toast(msg) {
+// Pass `undo` to offer an Undo button; it restores the state captured by snapshot().
+const undoFns = new Map();
+function toast(msg, undo) {
   const el = document.createElement('div');
   el.className = 'toast';
   el.textContent = msg;
+  if (undo) {
+    const id = uid();
+    undoFns.set(id, undo);
+    el.insertAdjacentHTML('beforeend', ` <button class="toast-undo" data-action="toast-undo" data-id="${id}">Undo</button>`);
+    setTimeout(() => undoFns.delete(id), 6000);
+  }
+  $$('#toasts .toast').slice(0, -1).forEach((old) => old.remove()); // keep at most two on screen
   $('#toasts').append(el);
-  setTimeout(() => el.remove(), 2600);
+  setTimeout(() => el.remove(), undo ? 6000 : 2600);
+}
+function snapshot() {
+  const json = JSON.stringify(state);
+  return () => { state = normalize(JSON.parse(json)); save(); render(); };
 }
 
-const durOptions = (sel) => DURATIONS.map((d) => `<option value="${d}" ${d === sel ? 'selected' : ''}>${d < 60 ? `${d} min` : fmtHours(d).replace(' h', ' hr')}</option>`).join('');
+const durOptions = (sel) => [...new Set([...DURATIONS, sel])].sort((a, b) => a - b).map((d) => `<option value="${d}" ${d === sel ? 'selected' : ''}>${d < 60 ? `${d} min` : fmtHours(d).replace(' h', ' hr')}</option>`).join('');
 const subRow = (s = { id: uid(), title: '', done: false }) => `<div class="sub-edit" data-sub-id="${s.id}">
   <input type="checkbox" class="check" data-sub-done ${s.done ? 'checked' : ''} aria-label="Done">
   <input class="input" data-sub-title value="${esc(s.title)}" placeholder="Subtask">
@@ -763,19 +978,25 @@ function nextSlot() { return clamp(Math.ceil((nowMinutes() + 1) / 60) * 60, 0, 2
 function openTaskModal(id, defaults = {}) {
   const t = id ? taskById(id) : { title: '', listId: state.lists[0].id, priority: 'none', due: null, notes: '', subtasks: [], block: null, ...defaults };
   if (!t) return;
-  const b = t.block || { date: t.due || ui.calDate, start: nextSlot(), dur: 60 };
+  const b = t.block || { date: t.due || ui.calDate, start: nextSlot(), dur: t.est || 60 };
   openModal(`<form data-form="task" data-id="${id || ''}"><h2>${id ? 'Edit task' : 'New task'}</h2>
     <div class="fields">
       <label class="field full">Title<input class="input" name="title" required value="${esc(t.title)}"></label>
       <label class="field">List<select class="input" name="listId">${listOptions(t.listId)}</select></label>
       <label class="field">Priority<select class="input" name="priority">${Object.entries(PRIORITY).map(([v, l]) => `<option value="${v}" ${t.priority === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label class="field">Due date<input class="input" type="date" name="due" value="${t.due || ''}"></label>
+      <label class="field">Time estimate<select class="input" name="est"><option value="">Not set</option>${DURATIONS.map((d) => `<option value="${d}" ${t.est === d ? 'selected' : ''}>${fmtDur(d)}</option>`).join('')}</select></label>
       <label class="field">Repeat<select class="input" name="repeat">${Object.entries(REPEAT).map(([v, l]) => `<option value="${v}" ${(t.repeat || 'none') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label class="field full">Calendar<span class="row" style="height:36px;font-weight:500;color:var(--text)"><input type="checkbox" class="check" name="blocked" data-action="toggle-block-fields" ${t.block ? 'checked' : ''}> Time-block this task</span></label>
       <div class="full fields ${t.block ? '' : 'hidden'}" id="block-fields" style="grid-template-columns:repeat(3,minmax(0,1fr))">
         <label class="field">Date<input class="input" type="date" name="bdate" value="${b.date}"></label>
         <label class="field">Start<input class="input" type="time" name="bstart" step="900" value="${toHHMM(b.start)}"></label>
         <label class="field">Duration<select class="input" name="bdur">${durOptions(b.dur)}</select></label>
+        ${id && t.block ? `<div class="full row wrap"><span class="small muted">Move:</span>
+          <button type="button" class="btn sm" data-action="push" data-how="hour" data-id="${id}">+1 hour</button>
+          <button type="button" class="btn sm" data-action="push" data-how="later" data-id="${id}">Later today</button>
+          <button type="button" class="btn sm" data-action="push" data-how="nextday" data-id="${id}">Next day</button>
+          <button type="button" class="btn sm" data-action="push" data-how="next" data-id="${id}">Next free slot</button></div>` : ''}
       </div>
       <label class="field full">Notes<textarea class="input" name="notes" rows="3">${esc(t.notes)}</textarea></label>
       <div class="full"><div class="field" style="margin-bottom:6px">Subtasks</div><div id="sub-edit">${t.subtasks.map(subRow).join('')}</div>
@@ -788,16 +1009,56 @@ function openTaskModal(id, defaults = {}) {
       <button class="btn primary">Save</button>
     </div></form>`);
 }
+// Quick picks: each finds the first free gap from a starting point, so none of them double-book.
+function quickPicks() {
+  const now = nowMinutes(), T = todayStr(), tmr = ymd(addDays(new Date(), 1));
+  return [
+    ['next', 'Next free slot', T, 0],
+    ['hour', 'In 1 hour', T, now + 60],
+    now < 17 * 60 && ['afternoon', 'This afternoon', T, 13 * 60],
+    now < 21 * 60 && ['tonight', 'Tonight', T, 19 * 60],
+    ['tomorrow', 'Tomorrow', tmr, 0],
+  ].filter(Boolean);
+}
 function openScheduleModal(id) {
   const t = taskById(id);
-  const date = ui.calDate >= todayStr() ? ui.calDate : todayStr();
+  const first = findSlot(taskDur(t), ui.calDate, 0, { excludeId: id }) || { date: todayStr(), start: nextSlot() };
+  const picks = quickPicks().map(([k, label, ds, from]) => {
+    const slot = findSlot(taskDur(t), ds, from, { excludeId: id, days: k === 'next' ? 14 : 1 });
+    return slot ? `<button type="button" class="pick" data-action="quick-pick" data-id="${id}" data-date="${slot.date}" data-start="${slot.start}">
+      <b>${label}</b><span>${slotLabel(slot)}</span></button>` : '';
+  }).join('');
   openModal(`<form data-form="schedule" data-id="${id}"><h2>Schedule “${esc(t.title)}”</h2>
+    <div class="picks">${picks}
+      <button type="button" class="pick" data-action="place-start" data-id="${id}"><b>Pick on calendar</b><span>Tap a time on the calendar</span></button></div>
+    <div class="muted small" style="margin:16px 0 8px">Or choose a time</div>
     <div class="fields" style="grid-template-columns:repeat(3,minmax(0,1fr))">
-      <label class="field">Date<input class="input" type="date" name="date" value="${date}" required></label>
-      <label class="field">Start<input class="input" type="time" name="start" step="900" value="${toHHMM(nextSlot())}" required></label>
-      <label class="field">Duration<select class="input" name="dur">${durOptions(60)}</select></label>
+      <label class="field">Date<input class="input" type="date" name="date" value="${first.date}" required></label>
+      <label class="field">Start<input class="input" type="time" name="start" step="900" value="${toHHMM(first.start)}" required></label>
+      <label class="field">Duration<select class="input" name="dur">${durOptions(taskDur(t))}</select></label>
     </div>
     <div class="modal-foot"><span class="spacer"></span><button type="button" class="btn" data-action="close-modal">Cancel</button><button class="btn primary">Schedule</button></div></form>`);
+}
+function busyDays(days) {
+  const key = [...days].sort().join('');
+  if (key === '12345') return 'Weekdays';
+  if (key === '0123456') return 'Every day';
+  if (key === '06') return 'Weekends';
+  return [1, 2, 3, 4, 5, 6, 0].filter((d) => days.includes(d)).map((d) => WEEKDAYS[d]).join(', ');
+}
+function openBusyModal(id) {
+  const b = id ? state.busy.find((x) => x.id === id) : { title: '', days: [1, 2, 3, 4, 5], start: 480, end: 900 };
+  if (!b) return;
+  openModal(`<form data-form="busy" data-id="${id || ''}"><h2>${id ? 'Edit busy time' : 'New busy time'}</h2>
+    <div class="fields">
+      <label class="field full">Name<input class="input" name="title" required value="${esc(b.title)}" placeholder="School, Period 3: Biology, Work…"></label>
+      <div class="field full">Days<div class="day-picks">${[1, 2, 3, 4, 5, 6, 0].map((d) => `<label class="day-pick"><input type="checkbox" name="days" value="${d}" ${b.days.includes(d) ? 'checked' : ''}><span>${WEEKDAYS[d]}</span></label>`).join('')}</div></div>
+      <label class="field">Starts<input class="input" type="time" step="300" name="start" value="${toHHMM(b.start)}" required></label>
+      <label class="field">Ends<input class="input" type="time" step="300" name="end" value="${toHHMM(b.end)}" required></label>
+    </div>
+    <div class="small" id="busy-msg" style="color:var(--danger);margin-top:8px"></div>
+    <div class="modal-foot">${id ? `<button type="button" class="btn danger" data-action="delete-busy" data-id="${id}">Delete</button>` : ''}<span class="spacer"></span>
+      <button type="button" class="btn" data-action="close-modal">Cancel</button><button class="btn primary">Save</button></div></form>`);
 }
 function openHabitModal(id) {
   const h = id ? habitById(id) : { name: '', goal: 5, reminder: '' };
@@ -829,7 +1090,7 @@ const FORMS = {
     })).filter((s) => s.title);
     const fields = {
       title: d.get('title').trim(), listId: d.get('listId'), priority: d.get('priority'), due: d.get('due') || null,
-      notes: d.get('notes'), subtasks, repeat: d.get('repeat'),
+      notes: d.get('notes'), subtasks, repeat: d.get('repeat'), est: +d.get('est') || null,
       block: d.get('blocked') ? { date: d.get('bdate') || todayStr(), start: fromHHMM(d.get('bstart') || '09:00'), dur: +d.get('bdur') } : null,
     };
     if (!fields.title) return;
@@ -842,6 +1103,15 @@ const FORMS = {
     const d = new FormData(f);
     taskById(f.dataset.id).block = { date: d.get('date'), start: fromHHMM(d.get('start')), dur: +d.get('dur') };
     commit(`Scheduled for ${fmtDate(d.get('date'))} at ${fmtTime(fromHHMM(d.get('start')))}`);
+  },
+  busy(f) {
+    const d = new FormData(f);
+    const fields = { title: d.get('title').trim(), days: d.getAll('days').map(Number), start: fromHHMM(d.get('start')), end: fromHHMM(d.get('end')) };
+    if (!fields.days.length) { $('#busy-msg').textContent = 'Pick at least one day.'; return; }
+    if (fields.end <= fields.start) { $('#busy-msg').textContent = 'The end time needs to be after the start time.'; return; }
+    if (f.dataset.id) Object.assign(state.busy.find((b) => b.id === f.dataset.id), fields);
+    else state.busy.push({ id: uid(), ...fields });
+    commit('Busy time saved');
   },
   habit(f) {
     const d = new FormData(f);
@@ -941,12 +1211,72 @@ const ACTIONS = {
     ui.calDate = ymd(d);
     render();
   },
-  'open-day': (el) => { ui.calView = 'day'; ui.calDate = el.dataset.day; render(); },
+  'open-day': (el) => {
+    const t = ui.placing && taskById(ui.placing);
+    if (t) { ui.placing = null; autoSchedule(t, el.dataset.day, 0, { sameDay: true }); return; }
+    ui.calView = 'day'; ui.calDate = el.dataset.day; render();
+  },
   slot: (el, e) => {
     const r = el.getBoundingClientRect();
-    const m = clamp(Math.floor(((e.clientY - r.top) / (r.height / 24)) * 2) * 30, 0, 23 * 60);
+    const exact = ((e.clientY - r.top) / (r.height / 24)) * 60;
+    const t = ui.placing && taskById(ui.placing);
+    if (t) {
+      const undo = snapshot();
+      const dur = taskDur(t);
+      t.block = { date: el.dataset.day, start: clamp(Math.floor(exact / 15) * 15, 0, 1440 - dur), dur };
+      ui.placing = null;
+      save(); render();
+      toast(`Scheduled ${slotLabel(t.block)}`, undo);
+      return;
+    }
+    const m = clamp(Math.floor(exact / 30) * 30, 0, 23 * 60);
     openTaskModal(null, { due: el.dataset.day, block: { date: el.dataset.day, start: m, dur: 60 } });
   },
+  'next-slot': (el) => autoSchedule(taskById(el.dataset.id)),
+  'quick-pick': (el) => {
+    const t = taskById(el.dataset.id), undo = snapshot();
+    t.block = { date: el.dataset.date, start: +el.dataset.start, dur: taskDur(t) };
+    closeModal(); save(); render();
+    toast(`Scheduled ${slotLabel(t.block)}`, undo);
+  },
+  'place-start': (el) => {
+    ui.placing = el.dataset.id;
+    closeModal();
+    if (currentView() !== 'calendar') location.hash = 'calendar'; else render();
+  },
+  'place-cancel': () => { ui.placing = null; render(); },
+  push: (el) => {
+    const t = taskById(el.dataset.id), how = el.dataset.how, b = t.block;
+    if (how === 'hour') {
+      const undo = snapshot();
+      b.start = Math.min(b.start + 60, 1440 - b.dur);
+      closeModal(); save(); render();
+      toast(`Moved to ${slotLabel(b)}`, undo);
+    } else if (how === 'later') autoSchedule(t, todayStr(), b.date === todayStr() ? b.start + b.dur : 0, { sameDay: true });
+    else if (how === 'nextday') autoSchedule(t, ymd(addDays(parse(b.date < todayStr() ? todayStr() : b.date), 1)), b.start);
+    else autoSchedule(t);
+  },
+  'toast-undo': (el) => { const fn = undoFns.get(el.dataset.id); undoFns.delete(el.dataset.id); el.closest('.toast')?.remove(); fn?.(); },
+  'catchup-all': () => {
+    const undo = snapshot();
+    const missed = missedTasks().sort(taskSort);
+    let placed = 0;
+    missed.forEach((t) => { if (autoSchedule(t, todayStr(), 0, { quiet: true })) placed++; });
+    save(); render();
+    toast(placed === missed.length ? `Rescheduled ${placed} task${placed === 1 ? '' : 's'}` : `Rescheduled ${placed} of ${missed.length}. No room for the rest in the next 2 weeks.`, undo);
+  },
+  'catchup-clear': () => {
+    const undo = snapshot();
+    missedTasks().forEach((t) => { t.block = null; });
+    save(); render();
+    toast('Moved back to unscheduled', undo);
+  },
+  'edit-busy': (el) => openBusyModal(el.dataset.id),
+  'new-busy': () => openBusyModal(null),
+  'delete-busy': (el) => askConfirm('Delete this busy time?', 'Delete', () => {
+    state.busy = state.busy.filter((b) => b.id !== el.dataset.id);
+    commit('Busy time deleted');
+  }),
 
   'new-note': () => {
     const n = { id: uid(), title: '', body: '', listId: ui.noteList !== 'all' ? ui.noteList : '', updatedAt: Date.now() };
@@ -1132,6 +1462,11 @@ document.addEventListener('click', (e) => {
     if (k) pressKey(k.dataset.key);
     return;
   }
+  if (ui.skipClick) { ui.skipClick = false; return; } // the click that ends a resize shouldn't open the task
+  if (ui.placing) {
+    const col = e.target.closest('.day-col');
+    if (col) { ACTIONS.slot(col, e); return; }
+  }
   const el = e.target.closest('[data-action]');
   if (el && ACTIONS[el.dataset.action]) ACTIONS[el.dataset.action](el, e);
 });
@@ -1144,6 +1479,10 @@ document.addEventListener('submit', (e) => {
 document.addEventListener('input', (e) => {
   const t = e.target;
   if (t.dataset.bind === 'focus') { state.focus[todayStr()] = t.value; save(); }
+  else if (t.dataset.quickadd) {
+    const box = t.parentElement.querySelector('[data-qa-preview]');
+    box.innerHTML = t.value.trim() ? quickPreview(parseQuick(t.value)) || '<span class="muted small">No date or time found</span>' : `<span class="muted small">${esc(quickHint())}</span>`;
+  }
   else if (t.dataset.filter) { ui.taskF[t.dataset.filter] = t.value; $('#task-list').innerHTML = taskListHtml(); }
   else if (t.hasAttribute('data-note-search')) { ui.noteQ = t.value; $('#note-items').innerHTML = noteItemsHtml(); }
   else if (t.dataset.noteField && t.tagName !== 'SELECT') {
@@ -1166,6 +1505,10 @@ document.addEventListener('change', (e) => {
     const n = state.notes.find((x) => x.id === ui.activeNote);
     n.listId = t.value; n.updatedAt = Date.now();
     save(); render();
+  } else if (t.dataset.setting && t.value) {
+    state.settings[t.dataset.setting] = t.value;
+    if (state.settings.dayEnd <= state.settings.dayStart) { toast('The day has to end after it starts'); state.settings.dayEnd = '22:00'; render(); }
+    save();
   } else if (t.hasAttribute('data-timer-task')) {
     ui.timer.taskId = t.value;
   } else if (t.hasAttribute('data-note-listfilter')) {
@@ -1194,17 +1537,17 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === 'Escape') { closeModal(); app.classList.remove('nav-open'); }
-  if (e.key === 'Enter' && e.target.dataset.quickadd) {
-    const title = e.target.value.trim();
-    if (!title) return;
-    state.tasks.push({ id: uid(), title, listId: state.lists[0].id, priority: 'none', due: todayStr(), done: false, doneAt: null, notes: '', subtasks: [], block: null, repeat: 'none', createdAt: Date.now() });
-    save(); render();
-    $('[data-quickadd]')?.focus();
-  }
+  if (e.key === 'Enter' && e.target.dataset.quickadd) quickAdd(e.target);
+  if (e.key === 'Escape' && ui.placing) { ui.placing = null; render(); }
   if (e.key === 'Enter' && e.target.hasAttribute('data-new-list')) addList(e.target.value);
 });
 
-window.addEventListener('hashchange', () => { app.classList.remove('nav-open'); render(); window.scrollTo(0, 0); });
+window.addEventListener('hashchange', () => {
+  app.classList.remove('nav-open');
+  if (currentView() !== 'calendar') ui.placing = null;
+  render();
+  window.scrollTo(0, 0);
+});
 
 /* ---------- Drag & drop: calendar ---------- */
 let drag = null;
@@ -1217,6 +1560,7 @@ function dropMinutes(col, e) {
 }
 
 document.addEventListener('dragstart', (e) => {
+  if (resize) { e.preventDefault(); return; }
   const order = e.target.closest?.('[data-order]');
   if (order) { drag = { order: order.dataset.order }; order.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', drag.order); return; }
   const el = e.target.closest?.('[data-drag]');
@@ -1227,7 +1571,7 @@ document.addEventListener('dragstart', (e) => {
     const hourPx = el.parentElement.getBoundingClientRect().height / 24;
     offsetMin = ((e.clientY - el.getBoundingClientRect().top) / hourPx) * 60;
   }
-  drag = { id: t.id, dur: t.block?.dur || 60, offsetMin };
+  drag = { id: t.id, dur: taskDur(t), offsetMin };
   e.dataTransfer.effectAllowed = 'move';
   e.dataTransfer.setData('text/plain', t.id);
 });
@@ -1294,6 +1638,39 @@ document.addEventListener('drop', (e) => {
 });
 
 document.addEventListener('dragend', () => { drag = null; clearDropMarks(); $$('.dragging').forEach((x) => x.classList.remove('dragging')); });
+
+/* ---------- Resizing calendar blocks ---------- */
+let resize = null;
+document.addEventListener('pointerdown', (e) => {
+  const handle = e.target.closest?.('[data-resize]');
+  if (!handle || ui.locked) return;
+  e.preventDefault();
+  const block = handle.parentElement, t = taskById(handle.dataset.resize);
+  resize = { t, block, top: block.getBoundingClientRect().top, hourPx: block.parentElement.getBoundingClientRect().height / 24, dur: t.block.dur, undo: snapshot() };
+  handle.setPointerCapture(e.pointerId);
+  block.classList.add('resizing');
+});
+document.addEventListener('pointermove', (e) => {
+  if (!resize) return;
+  const { t, block, top, hourPx } = resize;
+  resize.dur = clamp(Math.round((((e.clientY - top) / hourPx) * 60) / 15) * 15, 15, 1440 - t.block.start);
+  block.style.height = `${(resize.dur / 60) * hourPx - 2}px`;
+  const label = block.querySelector('span:not(.resize)');
+  if (label) label.textContent = `${fmtTime(t.block.start)} – ${fmtTime(t.block.start + resize.dur)}`;
+});
+function endResize() {
+  if (!resize) return;
+  const { t, dur, undo } = resize;
+  resize = null;
+  ui.skipClick = true;
+  setTimeout(() => { ui.skipClick = false; }, 0); // cleared if the release produced no click
+  if (dur === t.block.dur) { render(); return; }
+  t.block.dur = dur;
+  save(); render();
+  toast(`${t.title}: ${fmtDur(dur)}, ends ${fmtTime(t.block.start + dur)}`, undo);
+}
+document.addEventListener('pointerup', endResize);
+document.addEventListener('pointercancel', endResize);
 
 /* ---------- Tooltip ---------- */
 const tip = document.createElement('div');
