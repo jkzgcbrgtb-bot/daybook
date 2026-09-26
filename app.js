@@ -95,13 +95,74 @@ function emptyState() {
   };
 }
 
+/* ---------- Color categories ----------
+   Each list has a color and "sorting words". New tasks go to the list whose word appears in
+   the title: a school subject beats everything else, otherwise the earliest word wins. */
+const COLOR_COUNT = 12; // --c1…--c12; --c0 is the neutral gray
+const COLOR_NAMES = ['Gray', 'Blue', 'Orange', 'Aqua', 'Yellow', 'Magenta', 'Green', 'Violet', 'Red', 'Cyan', 'Brown', 'Slate', 'Lime'];
+const LIST_KINDS = { category: 'Other', subject: 'Subject', school: 'School' };
+const CATEGORY_SETUP = [
+  { id: 'l-inbox', name: 'Inbox', color: 0, kind: 'category', keywords: [] },
+  { id: 'l-school', name: 'School', color: 7, kind: 'school', keywords: ['school', 'homework', 'hw', 'quiz', 'quizzes', 'test', 'exam', 'study', 'studying', 'class', 'assignment', 'project', 'essay', 'frq', 'worksheet', 'presentation', 'midterm', 'final', 'ap exam'] },
+  { id: 'l-math', name: 'Math', color: 2, kind: 'subject', keywords: ['math', 'mah', 'algebra', 'geometry', 'calc', 'calculus', 'precalc', 'pre-calc', 'trig', 'trigonometry', 'stats', 'statistics', 'problem set', 'pset'] },
+  { id: 'l-english', name: 'English', color: 5, kind: 'subject', keywords: ['english', 'lang', 'ap lang', 'rhetoric', 'rhetorical analysis', 'synthesis essay', 'argument essay', 'literature', 'lit', 'novel', 'poem', 'poetry', 'annotate', 'annotations'] },
+  { id: 'l-latin', name: 'Latin', color: 10, kind: 'subject', keywords: ['latin', 'caesar', 'virgil', 'vergil', 'aeneid', 'ovid', 'cicero', 'catullus', 'declension', 'declensions', 'conjugation', 'conjugations', 'derivatives'] },
+  { id: 'l-law', name: 'Law', color: 9, kind: 'subject', keywords: ['law', 'legal', 'case brief', 'mock trial', 'court case', 'moot court'] },
+  { id: 'l-apes', name: 'APES', color: 3, kind: 'subject', keywords: ['apes', 'environmental', 'enviro', 'ecology', 'ecosystem', 'biome', 'biodiversity', 'pollution'] },
+  { id: 'l-apush', name: 'APUSH', color: 4, kind: 'subject', keywords: ['apush', 'us history', 'u.s. history', 'american history', 'history', 'dbq', 'leq', 'saq'] },
+  { id: 'l-work', name: 'Work', color: 1, kind: 'category', keywords: ['work', 'shift', 'job', 'clock in', 'meeting', 'manager', 'paycheck', 'timesheet'] },
+  { id: 'l-golf', name: 'Golf', color: 6, kind: 'category', keywords: ['golf', 'driving range', 'range session', 'putting', 'chipping', 'tee time', '9 holes', '18 holes', 'round of golf', 'golf lesson', 'caddie'] },
+  { id: 'l-tennis', name: 'Tennis', color: 12, kind: 'category', keywords: ['tennis', 'hitting session', 'serves', 'forehand', 'backhand', 'doubles', 'singles', 'racquet', 'racket', 'restring'] },
+  { id: 'l-lift', name: 'Lift', color: 8, kind: 'category', keywords: ['lift', 'lifting', 'gym', 'workout', 'weights', 'bench', 'squat', 'deadlift', 'leg day', 'push day', 'pull day', 'upper body', 'lower body', 'cardio'] },
+  { id: 'l-routine', name: 'Routine', color: 11, kind: 'category', keywords: ['routine', 'laundry', 'clean', 'cleaning', 'dishes', 'chores', 'shower', 'groceries', 'make bed', 'meal prep', 'trash', 'clean room', 'skincare', 'morning routine', 'night routine', 'pack bag'] },
+];
+const escapeRe = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function detectList(title, lists = state.lists) {
+  // "work on my essay" is about the essay, not a job.
+  const text = ` ${String(title).toLowerCase().replace(/\bwork(?:ing)? on\b/g, ' ')} `;
+  let best = null;
+  for (const l of lists) {
+    for (const raw of l.keywords || []) {
+      const k = raw.trim().toLowerCase();
+      if (!k) continue;
+      const m = new RegExp(`(^|[^a-z0-9])${escapeRe(k)}s?(?=[^a-z0-9]|$)`).exec(text);
+      if (!m) continue;
+      const cand = { l, rank: l.kind === 'subject' ? 0 : 1, pos: m.index, len: k.length };
+      if (!best || cand.rank < best.rank || (cand.rank === best.rank && (cand.pos < best.pos || (cand.pos === best.pos && cand.len > best.len)))) best = cand;
+    }
+  }
+  return best ? best.l : null;
+}
+const isSchool = (l) => l && (l.kind === 'school' || l.kind === 'subject');
+// One-time setup: add the color categories, keeping any lists that already exist by name.
+function setupCategories(s) {
+  if (s.categoriesV >= 1) return 0;
+  const inbox = s.lists.find((l) => l.name.toLowerCase() === 'inbox') || s.lists[0];
+  for (const def of CATEGORY_SETUP) {
+    const existing = def.name === 'Inbox' ? inbox : s.lists.find((l) => l.name.toLowerCase() === def.name.toLowerCase());
+    if (existing) Object.assign(existing, { color: def.color, kind: def.kind, keywords: existing.keywords?.length ? existing.keywords : def.keywords });
+    else s.lists.push({ ...def, keywords: [...def.keywords] });
+  }
+  // Keep Inbox first: it's where unsorted tasks land and where deleted lists' tasks go.
+  if (inbox) s.lists = [inbox, ...s.lists.filter((l) => l !== inbox)];
+  let moved = 0;
+  for (const t of s.tasks) {
+    if (t.done || (inbox && t.listId !== inbox.id)) continue;
+    const hit = detectList(t.title, s.lists);
+    if (hit && hit.id !== t.listId) { t.listId = hit.id; moved++; }
+  }
+  s.categoriesV = 1;
+  return moved;
+}
+
 /* ---------- Persistence ---------- */
+let ui_sorted = 0; // tasks moved by the one-time category setup, reported after boot
 function load() {
   try {
     const raw = localStorage.getItem(STORE);
     if (raw) return normalize(JSON.parse(raw));
   } catch (_) { /* start empty */ }
-  return emptyState();
+  return normalize(emptyState());
 }
 function normalize(s) {
   const base = emptyState();
@@ -119,6 +180,8 @@ function normalize(s) {
   out.settings.sections = out.settings.sections.filter((x) => SECTIONS[x.id]);
   out.tasks.forEach((t) => { t.subtasks = t.subtasks || []; t.repeat = t.repeat || 'none'; });
   out.habits.forEach((h) => { h.log = h.log || {}; });
+  out.lists.forEach((l) => { l.keywords = l.keywords || []; l.kind = l.kind || 'category'; if (l.color == null) l.color = 1; });
+  ui_sorted += setupCategories(out);
   return out;
 }
 function save() {
@@ -145,7 +208,7 @@ const taskById = (id) => state.tasks.find((t) => t.id === id);
 const listById = (id) => state.lists.find((l) => l.id === id);
 const habitById = (id) => state.habits.find((h) => h.id === id);
 const goalById = (id) => state.goals.find((g) => g.id === id);
-const listColor = (id) => { const l = listById(id); return l ? `var(--c${l.color})` : 'var(--muted)'; };
+const listColor = (id) => { const l = listById(id); return l ? `var(--c${l.color})` : 'var(--c0)'; };
 const doneOn = (t, ds) => t.done && t.doneAt && ymd(new Date(t.doneAt)) === ds;
 
 function taskSort(a, b) {
@@ -325,7 +388,8 @@ function quickPreview(p) {
   if (p.block) bits.push(`${ICONS.clock}${slotLabel(p.block)}`);
   else if (p.due) bits.push(`Due ${p.due === todayStr() ? 'today' : fmtDate(p.due, { weekday: 'short', month: 'short', day: 'numeric' })}`);
   if (p.est) bits.push(`~${fmtDur(p.est)}`);
-  if (p.listId) bits.push(`<span class="dot" style="background:${listColor(p.listId)}"></span>${esc(listById(p.listId).name)}`);
+  const lid = p.listId || detectList(p.title)?.id;
+  if (lid) bits.push(`<span class="dot" style="background:${listColor(lid)}"></span>${esc(listById(lid).name)}`);
   if (p.priority !== 'none') bits.push(`${PRIORITY[p.priority]} priority`);
   if (p.repeat !== 'none') bits.push(`↻ ${REPEAT_SHORT[p.repeat]}`);
   return bits.map((b) => `<span class="chip">${b}</span>`).join('');
@@ -340,7 +404,7 @@ function quickAdd(input) {
   if (!raw) return;
   const p = parseQuick(raw);
   const where = input.dataset.quickadd;
-  const listId = p.listId || (where === 'tasks' && ui.taskF.list !== 'all' ? ui.taskF.list : state.lists[0].id);
+  const listId = p.listId || detectList(p.title)?.id || (where === 'tasks' && !['all', 'school'].includes(ui.taskF.list) ? ui.taskF.list : state.lists[0].id);
   const due = p.due || (where === 'today' ? todayStr() : null);
   state.tasks.push({
     id: uid(), title: p.title, listId, priority: p.priority, due, done: false, doneAt: null, notes: '', subtasks: [],
@@ -399,7 +463,7 @@ function taskRow(t) {
   if (t.subtasks.length) meta.push(`<span class="chip">${t.subtasks.filter((s) => s.done).length}/${t.subtasks.length} subtasks</span>`);
   const subs = t.subtasks.length ? `<ul class="subtasks">${t.subtasks.map((s) => `
     <li class="${s.done ? 'done' : ''}"><input type="checkbox" class="check" data-action="toggle-sub" data-id="${t.id}" data-sub="${s.id}" ${s.done ? 'checked' : ''} aria-label="Complete subtask"><span>${esc(s.title)}</span></li>`).join('')}</ul>` : '';
-  return `<div class="task ${t.done ? 'done' : ''}">
+  return `<div class="task ${t.done ? 'done' : ''}" style="--lc:${listColor(t.listId)}">
     <input type="checkbox" class="check round" data-action="toggle-task" data-id="${t.id}" ${t.done ? 'checked' : ''} aria-label="Complete task">
     <div class="task-body">
       <div class="task-title" data-action="edit-task" data-id="${t.id}">${esc(t.title)}</div>
@@ -412,7 +476,12 @@ function taskRow(t) {
     </div>
   </div>`;
 }
-const listOptions = (sel, extra = '') => extra + state.lists.map((l) => `<option value="${l.id}" ${l.id === sel ? 'selected' : ''}>${esc(l.name)}</option>`).join('');
+// School lists are grouped together in every picker.
+const listOptions = (sel, extra = '') => {
+  const opt = (l) => `<option value="${l.id}" ${l.id === sel ? 'selected' : ''}>${esc(l.name)}</option>`;
+  const school = state.lists.filter(isSchool), other = state.lists.filter((l) => !isSchool(l));
+  return extra + other.map(opt).join('') + (school.length ? `<optgroup label="School">${school.map(opt).join('')}</optgroup>` : '');
+};
 const pageHead = (title, sub = '', right = '') => `<div class="page-head"><div><h1>${title}</h1>${sub ? `<div class="sub">${sub}</div>` : ''}</div><div class="row wrap">${right}</div></div>`;
 const goalBar = (g) => {
   const pct = g.target ? clamp(Math.round((g.current / g.target) * 100), 0, 100) : 0;
@@ -620,7 +689,8 @@ function viewCalendar() {
   const placing = ui.placing && taskById(ui.placing);
   const banner = placing ? `<div class="place-banner" role="status"><span>Tap a time on the calendar for <b>${esc(placing.title)}</b> (${fmtDur(taskDur(placing))})</span>
     <button class="btn sm" data-action="place-cancel">Cancel</button></div>` : '';
-  return pageHead('Calendar', calTitle(), toolbar) + banner +
+  const legend = `<div class="legend" aria-label="Color key">${state.lists.map((l) => `<span class="chip"><span class="dot" style="background:var(--c${l.color})"></span>${esc(l.name)}</span>`).join('')}</div>`;
+  return pageHead('Calendar', calTitle(), toolbar) + banner + legend +
     `<div class="cal-layout ${placing ? 'placing' : ''}">${tray}<div>${ui.calView === 'month' ? monthGrid() : timeGrid(calDays())}</div></div>`;
 }
 function afterCalendar() {
@@ -638,7 +708,7 @@ function filteredTasks() {
   return state.tasks.filter((t) => {
     if (f.status === 'open' && t.done) return false;
     if (f.status === 'done' && !t.done) return false;
-    if (f.list !== 'all' && t.listId !== f.list) return false;
+    if (f.list === 'school' ? !isSchool(listById(t.listId)) : f.list !== 'all' && t.listId !== f.list) return false;
     if (f.prio !== 'all' && t.priority !== f.prio) return false;
     if (f.due === 'overdue' && !(t.due && t.due < T && !t.done)) return false;
     if (f.due === 'today' && t.due !== T) return false;
@@ -658,7 +728,7 @@ function viewTasks() {
   const sel = (key, opts) => `<select class="input" data-filter="${key}" aria-label="${key}">${opts.map(([v, l]) => `<option value="${v}" ${f[key] === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
   const filters = `<div class="filters">
     <input type="search" class="input" data-filter="q" placeholder="Search tasks and subtasks" value="${esc(f.q)}" aria-label="Search">
-    ${sel('list', [['all', 'All lists'], ...state.lists.map((l) => [l.id, esc(l.name)])])}
+    <select class="input" data-filter="list" aria-label="List">${listOptions(f.list, `<option value="all" ${f.list === 'all' ? 'selected' : ''}>All lists</option><option value="school" ${f.list === 'school' ? 'selected' : ''}>All school</option>`)}</select>
     ${sel('prio', [['all', 'Any priority'], ['high', 'High'], ['med', 'Medium'], ['low', 'Low'], ['none', 'No priority']])}
     ${sel('due', [['all', 'Any due date'], ['overdue', 'Overdue'], ['today', 'Due today'], ['week', 'Next 7 days'], ['none', 'No due date']])}
     ${sel('status', [['open', 'Open'], ['done', 'Completed'], ['all', 'All']])}
@@ -911,11 +981,19 @@ function viewSettings() {
         `<input type="checkbox" class="check" data-action="nav-toggle" data-id="${n.id}" ${s.hiddenNav.includes(n.id) ? '' : 'checked'} ${n.locked ? 'disabled' : ''} aria-label="Show ${n.label}">`)).join('')}
     </section>
 
-    <section class="card"><h2>Lists</h2><p class="muted small">Lists group tasks and notes. Deleting a list moves its tasks to the first list.</p>
-      <div class="stack" style="gap:8px">${state.lists.map((l) => `<div class="row"><span class="dot" style="background:var(--c${l.color})"></span>
-        <input class="input" data-list-name="${l.id}" value="${esc(l.name)}" aria-label="List name">
-        <button class="btn icon ghost sm" data-action="delete-list" data-id="${l.id}" ${state.lists.length < 2 ? 'disabled' : ''} aria-label="Delete list">${ICONS.trash}</button></div>`).join('')}
+    <section class="card"><h2>Lists &amp; colors</h2>
+      <p class="muted small">Each list has a color and sorting words. New tasks go to the list whose word appears in the title. School subjects win over everything else, so "math test" goes to Math. Deleting a list moves its tasks to ${esc(state.lists[0].name)}.</p>
+      <div class="stack" style="gap:8px">${[...state.lists.filter((l) => !isSchool(l)).slice(0, 1), ...state.lists.filter(isSchool), ...state.lists.filter((l) => !isSchool(l)).slice(1)].map((l, i) => `<div class="list-edit" style="--lc:var(--c${l.color})">
+        <div class="row">
+          <button class="swatch-btn" data-action="list-color" data-id="${l.id}" aria-label="Color for ${esc(l.name)}: ${COLOR_NAMES[l.color]}" title="Change color"></button>
+          <input class="input" data-list-name="${l.id}" id="list-name-${l.id}" value="${esc(l.name)}" aria-label="List name">
+          <select class="input" data-list-kind="${l.id}" id="list-kind-${l.id}" aria-label="Kind" style="width:auto" ${l.id === state.lists[0].id ? 'disabled' : ''}>${Object.entries(LIST_KINDS).map(([k, lab]) => `<option value="${k}" ${l.kind === k ? 'selected' : ''}>${lab}</option>`).join('')}</select>
+          <button class="btn icon ghost sm" data-action="delete-list" data-id="${l.id}" ${l.id === state.lists[0].id ? 'disabled' : ''} aria-label="Delete list">${ICONS.trash}</button>
+        </div>
+        ${l.id === state.lists[0].id ? '<div class="muted small" style="margin:6px 0 0 38px">Tasks that match no sorting word land here.</div>' : `<input class="input kw-input" data-list-keywords="${l.id}" id="list-kw-${l.id}" value="${esc(l.keywords.join(', '))}" placeholder="Sorting words, separated by commas" aria-label="Sorting words for ${esc(l.name)}">`}
+      </div>`).join('')}
         <div class="row"><input class="input" data-new-list placeholder="New list name, press Enter" aria-label="New list"><button class="btn" data-action="add-list">Add</button></div>
+        <div class="row wrap"><button class="btn" data-action="sort-inbox">Sort ${esc(state.lists[0].name)} tasks now</button><span class="muted small">Moves open tasks from ${esc(state.lists[0].name)} into the list their title matches.</span></div>
       </div>
     </section>
 
@@ -983,8 +1061,8 @@ function openTaskModal(id, defaults = {}) {
   const b = t.block || { date: t.due || ui.calDate, start: nextSlot(), dur: t.est || 60 };
   openModal(`<form data-form="task" data-id="${id || ''}"><h2>${id ? 'Edit task' : 'New task'}</h2>
     <div class="fields">
-      <label class="field full">Title<input class="input" name="title" required value="${esc(t.title)}"></label>
-      <label class="field">List<select class="input" name="listId">${listOptions(t.listId)}</select></label>
+      <label class="field full">Title<input class="input" name="title" required value="${esc(t.title)}" ${id ? '' : 'data-autosort'}></label>
+      <label class="field">List<select class="input" name="listId" ${id ? '' : 'data-autosort-target'}>${listOptions(t.listId)}</select></label>
       <label class="field">Priority<select class="input" name="priority">${Object.entries(PRIORITY).map(([v, l]) => `<option value="${v}" ${t.priority === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label class="field">Due date<input class="input" type="date" name="due" value="${t.due || ''}"></label>
       <label class="field">Time estimate<select class="input" name="est"><option value="">Not set</option>${DURATIONS.map((d) => `<option value="${d}" ${t.est === d ? 'selected' : ''}>${fmtDur(d)}</option>`).join('')}</select></label>
@@ -1350,10 +1428,23 @@ const ACTIONS = {
     state.settings.hiddenNav = [...hidden];
     save(); render();
   },
+  'list-color': (el) => openColorModal(el.dataset.id),
+  'set-list-color': (el) => { listById(el.dataset.id).color = +el.dataset.color; save(); closeModal(); render(); },
+  'sort-inbox': () => {
+    const undo = snapshot(), inbox = state.lists[0];
+    let moved = 0;
+    state.tasks.forEach((t) => {
+      if (t.done || t.listId !== inbox.id) return;
+      const hit = detectList(t.title);
+      if (hit && hit.id !== inbox.id) { t.listId = hit.id; moved++; }
+    });
+    save(); render();
+    toast(moved ? `Sorted ${moved} task${moved === 1 ? '' : 's'}` : `No ${inbox.name} tasks matched a sorting word`, moved ? undo : null);
+  },
   'add-list': () => addList($('[data-new-list]').value),
   'delete-list': (el) => {
     const l = listById(el.dataset.id);
-    if (state.lists.length < 2) return;
+    if (state.lists.length < 2 || l.id === state.lists[0].id) return;
     askConfirm(`Delete list “${l.name}”? Its tasks move to another list.`, 'Delete', () => {
       state.lists = state.lists.filter((x) => x !== l);
       const fallback = state.lists[0].id;
@@ -1391,9 +1482,19 @@ function addList(name) {
   name = name.trim();
   if (!name) return;
   const used = new Set(state.lists.map((l) => l.color));
-  const color = [1, 2, 3, 4, 5, 6, 7, 8].find((c) => !used.has(c)) || (state.lists.length % 8) + 1;
-  state.lists.push({ id: uid(), name, color });
-  commit('List added');
+  const color = Array.from({ length: COLOR_COUNT }, (_, i) => i + 1).find((c) => !used.has(c)) || (state.lists.length % COLOR_COUNT) + 1;
+  state.lists.push({ id: uid(), name, color, kind: 'category', keywords: [name.toLowerCase()] });
+  commit('List added. Set its color and sorting words below.');
+}
+function openColorModal(id) {
+  const l = listById(id);
+  openModal(`<h2>Color for ${esc(l.name)}</h2>
+    <div class="color-grid">${COLOR_NAMES.map((n, c) => {
+      const usedBy = state.lists.filter((x) => x.color === c && x.id !== id).map((x) => x.name);
+      return `<button class="color-pick ${l.color === c ? 'on' : ''}" style="--pc:var(--c${c})" data-action="set-list-color" data-id="${id}" data-color="${c}">
+        <span></span><b>${n}</b><small>${usedBy.length ? esc(usedBy.join(', ')) : 'Unused'}</small></button>`;
+    }).join('')}</div>
+    <div class="modal-foot"><span class="spacer"></span><button class="btn" data-action="close-modal">Done</button></div>`);
 }
 
 /* =========================================================
@@ -1481,6 +1582,12 @@ document.addEventListener('submit', (e) => {
 document.addEventListener('input', (e) => {
   const t = e.target;
   if (t.dataset.bind === 'focus') { state.focus[todayStr()] = t.value; save(); }
+  else if (t.hasAttribute('data-autosort')) {
+    const target = t.form.querySelector('[data-autosort-target]');
+    const hit = detectList(t.value);
+    if (target && !target.dataset.touched) target.value = hit ? hit.id : state.lists[0].id;
+  }
+  else if (t.hasAttribute('data-autosort-target')) t.dataset.touched = '1';
   else if (t.dataset.quickadd) {
     const box = t.parentElement.querySelector('[data-qa-preview]');
     box.innerHTML = t.value.trim() ? quickPreview(parseQuick(t.value)) || '<span class="muted small">No date or time found</span>' : `<span class="muted small">${esc(quickHint())}</span>`;
@@ -1515,6 +1622,13 @@ document.addEventListener('change', (e) => {
     ui.timer.taskId = t.value;
   } else if (t.hasAttribute('data-note-listfilter')) {
     ui.noteList = t.value; ui.activeNote = null; render();
+  } else if (t.dataset.listKind) {
+    listById(t.dataset.listKind).kind = t.value;
+    save(); render();
+  } else if (t.dataset.listKeywords) {
+    listById(t.dataset.listKeywords).keywords = t.value.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+    save();
+    toast('Sorting words saved');
   } else if (t.dataset.listName) {
     const name = t.value.trim();
     if (name) { listById(t.dataset.listName).name = name; save(); render(); }
@@ -1822,10 +1936,13 @@ function applyRemote(json, force = false) {
   // Local edits that haven't been sent yet win; they overwrite the remote copy on the next push.
   if (!force && (sync.timer || sync.writing || sync.dirty)) return;
   try {
-    const next = normalize(JSON.parse(json));
+    const raw = JSON.parse(json);
+    const needsSetup = !raw.categoriesV;
+    const next = normalize(raw);
     sync.lastJson = json;
     state = next;
     try { localStorage.setItem(STORE, json); } catch (_) { /* ignore */ }
+    if (needsSetup) queuePush(); // share the one-time category setup with the other devices
     setSync('synced');
     if (ui.locked) renderLock();
     safeRender();
@@ -2109,6 +2226,7 @@ FORMS['cloud-connect'] = async (f) => {
 };
 
 /* ---------- Boot ---------- */
+if (ui_sorted) { save(); setTimeout(() => toast(`Color categories added. Sorted ${ui_sorted} task${ui_sorted === 1 ? '' : 's'} out of your Inbox.`), 400); }
 render();
 renderLock();
 setSync('local');

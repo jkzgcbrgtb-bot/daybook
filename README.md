@@ -26,6 +26,7 @@ The default passcode is **1234**. You can change it in Settings → Security.
   - A block's Move options are +1 hour, Later today, Next day and Next free slot.
   - **Not finished yet** on Today reschedules missed blocks in one tap.
   - Every automatic change can be undone from its notification.
+- **Color categories**: every list has a color and sorting words. New tasks (quick add, the task editor, or Cowork) go to the list whose word appears in the title. School subjects win over everything else, so "math test" goes to Math, and "work on" never counts as Work. The defaults are School, the subjects Math, English, Latin, Law, APES and APUSH, and the categories Work, Golf, Tennis, Lift and Routine, all editable in Settings → Lists & colors. Colors show as stripes on task rows, calendar blocks and the schedule, with a color key on the Calendar page.
 - **Busy times** (Settings → Schedule): repeating weekly blocks, such as a class timetable, that show on the calendar and are never scheduled over.
 - **Tasks**: search, plus filters for list, priority, due date and status. Add, edit and delete tasks and their subtasks. Tasks can repeat daily, on weekdays, weekly or monthly, and completing one creates the next occurrence.
 - **Notes**: search with highlighting, auto-save, and linking to a list (with a jump to that list's open tasks).

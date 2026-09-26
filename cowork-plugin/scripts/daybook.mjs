@@ -179,6 +179,24 @@ function normalize(s) {
   return s;
 }
 
+/* ---------- auto-sorting into lists (mirrors detectList in app.js) ---------- */
+const escapeRe = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function detectList(title, lists) {
+  const text = ` ${String(title).toLowerCase().replace(/\bwork(?:ing)? on\b/g, ' ')} `;
+  let best = null;
+  for (const l of lists) {
+    for (const raw of l.keywords || []) {
+      const k = raw.trim().toLowerCase();
+      if (!k) continue;
+      const m = new RegExp(`(^|[^a-z0-9])${escapeRe(k)}s?(?=[^a-z0-9]|$)`).exec(text);
+      if (!m) continue;
+      const cand = { l, rank: l.kind === 'subject' ? 0 : 1, pos: m.index, len: k.length };
+      if (!best || cand.rank < best.rank || (cand.rank === best.rank && (cand.pos < best.pos || (cand.pos === best.pos && cand.len > best.len)))) best = cand;
+    }
+  }
+  return best ? best.l : null;
+}
+
 /* ---------- lookups & views ---------- */
 function byId(arr, id, what) {
   const hit = arr.find((x) => x.id === id);
@@ -358,6 +376,7 @@ const COMMANDS = {
     return v.mutate((s) => {
       const t = { id: uid(), title: '', listId: s.lists[0].id, priority: 'none', due: null, done: false, doneAt: null, notes: '', subtasks: [], block: null, repeat: 'none', est: null, createdAt: Date.now(), createdBy: 'claude' };
       applyTaskFields(s, t, args);
+      if (!args.list) t.listId = (detectList(t.title, s.lists) || s.lists[0]).id; // same auto-sorting as the app
       if (t.repeat !== 'none' && !t.due && !t.block) t.due = today();
       if (args['next-free']) {
         const slot = findSlot(s, t.est || 60, today()) || fail('No free gap in the next 2 weeks within day hours.');
@@ -537,7 +556,7 @@ const COMMANDS = {
   async lists(args, v) {
     const { state: s } = await v.read();
     return {
-      lists: s.lists.map((l) => ({ name: l.name, open_tasks: s.tasks.filter((t) => t.listId === l.id && !t.done).length })),
+      lists: s.lists.map((l) => ({ name: l.name, kind: l.kind || 'category', sorting_words: l.keywords || [], open_tasks: s.tasks.filter((t) => t.listId === l.id && !t.done).length })),
       busy_times: s.busy.map((b) => ({ title: b.title, days: b.days.map((d) => WEEKDAYS[d]), start: toHHMM(b.start), end: toHHMM(b.end) })),
       day_hours: `${s.settings.dayStart}–${s.settings.dayEnd}`, time_zone: TZ,
     };
