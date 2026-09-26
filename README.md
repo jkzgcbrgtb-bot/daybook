@@ -17,6 +17,16 @@ The default passcode is **1234**. You can change it in Settings → Security.
 - **Lock screen**: the app stays blurred behind a passcode keypad. A wrong code shakes the dots and shows an error, and 5 misses trigger a 30-second cooldown. You can lock from the sidebar, the mobile top bar, or Settings.
 - **Today**: focus line, a focus timer (25-minute focus sessions with 5- and 15-minute breaks, optionally linked to a task), today's time blocks (the current one is highlighted), due and overdue tasks with subtasks, quick add, habit check-offs, and goal progress bars.
 - **Calendar**: day, week and month views. Drag an unscheduled task onto the grid to time-block it, or press **Schedule** on touch devices. Drag blocks to move them, or drop one back on the tray to unschedule it. Click a block to edit it, or an empty slot to create a task.
+- **Scheduling helpers**:
+  - Quick add understands plain English, like `essay fri 3pm 2h #school !high every week`, and shows a preview as you type.
+  - Tasks can have a time estimate.
+  - **Next free slot** (⚡) finds the first gap that fits, within your day hours and around your busy times.
+  - The Schedule dialog has quick picks (In 1 hour, This afternoon, Tonight, Tomorrow) and **Pick on calendar**, which works on phones.
+  - Drag a block's bottom edge to resize it.
+  - A block's Move options are +1 hour, Later today, Next day and Next free slot.
+  - **Not finished yet** on Today reschedules missed blocks in one tap.
+  - Every automatic change can be undone from its notification.
+- **Busy times** (Settings → Schedule): repeating weekly blocks, such as a class timetable, that show on the calendar and are never scheduled over.
 - **Tasks**: search, plus filters for list, priority, due date and status. Add, edit and delete tasks and their subtasks. Tasks can repeat daily, on weekdays, weekly or monthly, and completing one creates the next occurrence.
 - **Notes**: search with highlighting, auto-save, and linking to a list (with a jump to that list's open tasks).
 - **Habits**: 7-day tick grid, streaks, weekly goals, reminder times (browser notifications or in-app toasts), goals with +/− progress, and an auto-saving weekly review with a summary of the week.

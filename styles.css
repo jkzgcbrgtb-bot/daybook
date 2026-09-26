@@ -365,3 +365,35 @@ details summary { cursor: pointer; font-weight: 500; }
 .sync-status[data-status="error"]::before, .sync-status[data-status="readonly"]::before, .sync-status[data-status="full"]::before { background: var(--danger); }
 .sync-key { word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; background: var(--surface-2); padding: 5px 9px; border-radius: 7px; user-select: all; }
 #cloud-status[data-status="error"] { color: var(--danger); }
+
+/* ---------- Scheduling helpers ---------- */
+.quick-add { margin-top: 10px; }
+.qa-preview { display: flex; flex-wrap: wrap; gap: 5px; min-height: 22px; margin-top: 6px; }
+.toast { display: flex; align-items: center; gap: 12px; }
+.toast-undo { border: 0; background: transparent; color: var(--accent-soft); font-weight: 700; cursor: pointer; padding: 2px 4px; text-decoration: underline; }
+.picks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.pick { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); cursor: pointer; }
+.pick:hover, .pick:focus-visible { border-color: var(--accent); background: var(--accent-soft); outline: none; }
+.pick span { font-size: 12px; color: var(--text-2); }
+.place-banner { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 10px 14px; margin-bottom: 12px; border-radius: 10px; background: var(--accent); color: var(--accent-ink); font-weight: 500; }
+.cal-layout.placing .day-col { cursor: crosshair; }
+.cal-layout.placing .day-col:hover { background-color: var(--accent-soft); }
+.block.busy {
+  cursor: pointer; border-left-color: var(--muted); color: var(--text-2);
+  background: repeating-linear-gradient(135deg, var(--surface-2) 0 6px, color-mix(in srgb, var(--surface-2) 55%, var(--surface)) 6px 12px);
+}
+.block .resize { position: absolute; left: 0; right: 0; bottom: 0; height: 8px; cursor: ns-resize; touch-action: none; }
+.block .resize::after { content: ""; position: absolute; left: 50%; bottom: 2px; width: 22px; height: 3px; margin-left: -11px; border-radius: 2px; background: var(--bc, var(--c1)); opacity: 0; transition: opacity .15s; }
+.block:hover .resize::after, .block.resizing .resize::after { opacity: .8; }
+@media (hover: none) { .block .resize { height: 14px; } .block .resize::after { opacity: .6; } }
+.block.resizing { z-index: 3; box-shadow: 0 0 0 2px var(--accent); }
+.sched-item.busy { border-left-color: var(--muted); background: repeating-linear-gradient(135deg, var(--surface-2) 0 6px, color-mix(in srgb, var(--surface-2) 55%, var(--surface)) 6px 12px); color: var(--text-2); }
+.catchup { border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); }
+.catchup .task { align-items: center; }
+.busy-row { padding: 8px 10px; border: 1px solid var(--border); border-radius: 9px; flex-wrap: wrap; }
+.day-picks { display: flex; flex-wrap: wrap; gap: 6px; }
+.day-pick input { position: absolute; opacity: 0; pointer-events: none; }
+.day-pick span { display: inline-grid; place-items: center; min-width: 46px; height: 32px; padding: 0 8px; border-radius: 8px; border: 1px solid var(--border); cursor: pointer; font-weight: 500; color: var(--text); }
+.day-pick input:checked + span { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.day-pick input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 800px) { .picks { grid-template-columns: minmax(0, 1fr); } }
