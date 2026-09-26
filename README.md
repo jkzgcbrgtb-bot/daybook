@@ -51,6 +51,10 @@ Settings → Sync keeps devices in step through a secret gist on your GitHub acc
 
 The hosted version on claude.ai also saves your data to your account, in one private document per person (`data/users/<id>/daybook`). Any device signed in to the same account sees the same data, and the sidebar shows the sync status. The passcode is a privacy screen, not encryption: anyone with access to the browser's storage can read the data. Use Settings → Data → Export JSON to back up or move your data.
 
+## Claude Cowork plugin
+
+`daybook.plugin` (built from `cowork-plugin/`) lets Claude Cowork read and update Daybook through the same encrypted sync, and work ahead on tasks by saving prep work as notes for review. See `cowork-plugin/README.md`.
+
 ## Files
 
 - `index.html` is the shell.

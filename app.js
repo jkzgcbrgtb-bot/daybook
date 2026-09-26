@@ -127,6 +127,8 @@ function save() {
 }
 
 let state = load();
+// Recorded so helpers outside the browser (the Cowork plugin) know what "today" means here.
+try { state.settings.timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (_) { /* unknown */ }
 const ui = {
   locked: true, pin: '', fails: 0, lockUntil: 0, lockErr: '',
   calView: 'week', calDate: todayStr(), calScroll: null,
