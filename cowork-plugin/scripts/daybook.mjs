@@ -217,6 +217,7 @@ function taskView(s, t, full = false) {
     done: t.done, ...(t.est ? { estimate_min: t.est } : {}),
     ...(t.block ? { scheduled: { date: t.block.date, start: toHHMM(t.block.start), end: toHHMM(t.block.start + t.block.dur), minutes: t.block.dur } } : {}),
     ...(t.repeat !== 'none' ? { repeat: t.repeat } : {}),
+    ...(t.parentId ? { session_of: s.tasks.find((x) => x.id === t.parentId)?.title || null } : {}),
     subtasks: t.subtasks.map((x) => ({ id: x.id, title: x.title, done: x.done })),
     ...(t.subtasks.some((x) => x.title.startsWith(REVIEW_SUBTASK)) ? { claude_draft: true } : {}),
   };
@@ -269,6 +270,9 @@ function completeTask(s, t) {
   t.done = true;
   t.doneAt = Date.now();
   t.subtasks.forEach((x) => { x.done = true; });
+  // A split session ticks its line in the parent task, as the app does.
+  const parentSub = t.parentId && s.tasks.find((x) => x.id === t.parentId)?.subtasks.find((x) => x.id === t.subId);
+  if (parentSub) parentSub.done = true;
   if (t.repeat === 'none' || s.tasks.some((x) => x.id === t.nextId)) return null;
   const base = t.due || t.block?.date || today();
   let next = stepDate(base, t.repeat);

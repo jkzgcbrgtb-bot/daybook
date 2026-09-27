@@ -199,6 +199,7 @@ const ui = {
   noteQ: '', noteList: 'all', activeNote: null,
   hoursRange: 'week',
   placing: null, skipClick: false, showKey: false,
+  planDate: todayStr(), planExclude: new Set(), split: null,
   reminded: {},
   timer: { mode: 'focus', left: TIMER_MODES.focus[1] * 60, running: false, endAt: 0, taskId: '' },
 };
@@ -276,14 +277,16 @@ const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const taskDur = (t) => t.block?.dur || t.est || 60;
 const fmtDur = (m) => (m < 60 ? `${m} min` : m % 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m / 60} h`);
 const busyOn = (ds) => { const wd = parse(ds).getDay(); return state.busy.filter((b) => b.days.includes(wd)); };
-function occupied(ds, excludeId) {
+// `extra` holds blocks being planned but not saved yet ({date, start, dur}).
+function occupied(ds, excludeId, extra = []) {
   return [
     ...state.tasks.filter((t) => t.block && t.block.date === ds && t.id !== excludeId).map((t) => ({ start: t.block.start, end: t.block.start + t.block.dur })),
     ...busyOn(ds).map((b) => ({ start: b.start, end: b.end })),
+    ...extra.filter((x) => x.date === ds).map((x) => ({ start: x.start, end: x.start + x.dur })),
   ].sort((a, b) => a.start - b.start);
 }
 // The first gap of `dur` minutes within the day's hours, at or after fromDate/fromMin, never in the past.
-function findSlot(dur, fromDate = todayStr(), fromMin = 0, { excludeId, days = 14 } = {}) {
+function findSlot(dur, fromDate = todayStr(), fromMin = 0, { excludeId, days = 14, extra } = {}) {
   const dayStart = fromHHMM(state.settings.dayStart), dayEnd = fromHHMM(state.settings.dayEnd);
   const T = todayStr();
   if (fromDate < T) { fromDate = T; fromMin = 0; }
@@ -291,7 +294,7 @@ function findSlot(dur, fromDate = todayStr(), fromMin = 0, { excludeId, days = 1
     const ds = ymd(addDays(parse(fromDate), i));
     let start = Math.max(dayStart, i === 0 ? fromMin : 0, ds === T ? nowMinutes() : 0);
     start = Math.ceil(start / 15) * 15;
-    for (const o of occupied(ds, excludeId)) {
+    for (const o of occupied(ds, excludeId, extra)) {
       if (o.end <= start) continue;
       if (o.start - start >= dur) break;
       start = Math.ceil(o.end / 15) * 15;
@@ -313,6 +316,153 @@ function autoSchedule(t, fromDate, fromMin, { sameDay = false, quiet = false } =
   t.block = { date: slot.date, start: slot.start, dur };
   if (!quiet) { closeModal(); save(); render(); toast(`Scheduled ${slotLabel(slot)}`, undo); }
   return true;
+}
+
+/* ---------- Time tracking & estimate learning ---------- */
+const round15 = (m) => Math.max(15, Math.round(m / 15) * 15);
+// Minutes the focus timer logged against a task, including its split sessions.
+function spentOn(t) {
+  const ids = new Set([t.id, ...state.tasks.filter((x) => x.parentId === t.id).map((x) => x.id)]);
+  return state.pomodoros.reduce((a, p) => a + (ids.has(p.taskId) ? p.min : 0), 0);
+}
+// Finished tasks with both an estimate and at least 10 tracked minutes.
+function estimateSamples(listId) {
+  return state.tasks.filter((t) => t.done && t.est && !t.parentId && (!listId || t.listId === listId))
+    .map((t) => ({ t, spent: spentOn(t) })).filter((x) => x.spent >= 10).map((x) => x.spent / x.t.est);
+}
+const median = (xs) => { const a = [...xs].sort((x, y) => x - y); return a.length % 2 ? a[(a.length - 1) / 2] : (a[a.length / 2 - 1] + a[a.length / 2]) / 2; };
+// How long this person's tasks really take compared with their estimates: per list once there
+// are 3 samples, otherwise across all lists, otherwise 1. Clamped so one outlier can't run away.
+function estimateRatio(listId) {
+  let xs = estimateSamples(listId);
+  if (xs.length < 3) xs = estimateSamples(null);
+  return xs.length < 3 ? 1 : clamp(median(xs), 0.5, 2.5);
+}
+const realisticDur = (t) => (t.block?.dur && !t.est ? t.block.dur : t.est ? round15(t.est * estimateRatio(t.listId)) : 60);
+function ratioHint(listId) {
+  const own = estimateSamples(listId), r = estimateRatio(listId), name = listById(listId)?.name;
+  if (Math.abs(r - 1) < 0.1 || (own.length < 3 && estimateSamples(null).length < 3)) return '';
+  const scope = own.length >= 3 ? `${name} tasks` : 'tasks';
+  return `Your ${scope} usually take ${r > 1 ? `${r.toFixed(1)}× your estimate` : `about ${Math.round(r * 100)}% of your estimate`}.`;
+}
+
+/* ---------- Plan my day ---------- */
+function planScore(t, ds) {
+  let score = { high: 150, med: 75, low: 25, none: 0 }[t.priority] || 0;
+  if (t.due) {
+    const days = daysBetween(ds, t.due);
+    score += days < 0 ? 1000 - days : days === 0 ? 800 : days === 1 ? 600 : days <= 3 ? 400 : days <= 7 ? 200 : 50;
+  }
+  return score;
+}
+function planReason(t, ds) {
+  if (t.due) {
+    const days = daysBetween(ds, t.due);
+    if (days < 0) return 'Overdue';
+    if (days === 0) return 'Due today';
+    if (days === 1) return 'Due tomorrow';
+    if (days <= 7) return `Due ${fmtDate(t.due, { weekday: 'short' })}`;
+  }
+  return t.priority === 'high' ? 'High priority' : '';
+}
+const hasOpenSessions = (t) => state.tasks.some((x) => x.parentId === t.id && !x.done);
+const hasSessions = (t) => state.tasks.some((x) => x.parentId === t.id);
+// Greedy: most important first, each into the earliest gap that fits, with a 10-minute break after.
+function planDay(ds, exclude = new Set()) {
+  const BREAK = 10;
+  const candidates = state.tasks
+    .filter((t) => !t.done && (!t.block || t.block.date < todayStr()) && !hasSessions(t) && !exclude.has(t.id))
+    .sort((a, b) => planScore(b, ds) - planScore(a, ds) || taskSort(a, b));
+  const planned = [], skipped = [];
+  for (const t of candidates) {
+    if (planScore(t, ds) <= 0 && planned.length >= 6) break; // don't pad the day with low-stakes tasks
+    const dur = realisticDur(t);
+    const slot = findSlot(dur, ds, 0, { excludeId: t.id, days: 1, extra: planned.map((p) => ({ ...p, dur: p.dur + BREAK })) });
+    if (slot && slot.date === ds) planned.push({ t, date: ds, start: slot.start, dur, reason: planReason(t, ds) });
+    else if (planScore(t, ds) >= 150) skipped.push(t); // due within a week, or high priority
+  }
+  return { planned: planned.sort((a, b) => a.start - b.start), skipped };
+}
+function freeMinutes(ds) {
+  const dayStart = fromHHMM(state.settings.dayStart), dayEnd = fromHHMM(state.settings.dayEnd);
+  let cursor = Math.max(dayStart, ds === todayStr() ? nowMinutes() : 0), free = 0;
+  for (const o of occupied(ds)) {
+    if (o.end <= cursor) continue;
+    free += Math.max(0, Math.min(o.start, dayEnd) - cursor);
+    cursor = Math.max(cursor, o.end);
+  }
+  return free + Math.max(0, dayEnd - cursor);
+}
+function planModalHtml() {
+  const ds = ui.planDate, { planned, skipped } = planDay(ds, ui.planExclude);
+  const excluded = state.tasks.filter((t) => ui.planExclude.has(t.id));
+  const label = ds === todayStr() ? 'today' : fmtDate(ds, { weekday: 'long', month: 'short', day: 'numeric' });
+  const rows = planned.map((p) => `<label class="plan-row" style="--lc:${listColor(p.t.listId)}">
+      <input type="checkbox" class="check" data-plan-toggle="${p.t.id}" checked aria-label="Include ${esc(p.t.title)}">
+      <span class="time">${fmtTime(p.start)} – ${fmtTime(p.start + p.dur)}</span>
+      <span class="title">${esc(p.t.title)}</span>
+      ${p.reason ? `<span class="chip ${p.reason === 'Overdue' ? 'overdue' : ''}">${p.reason}</span>` : ''}</label>`).join('');
+  const off = excluded.map((t) => `<label class="plan-row off"><input type="checkbox" class="check" data-plan-toggle="${t.id}" aria-label="Include ${esc(t.title)}">
+      <span class="time muted">Left out</span><span class="title">${esc(t.title)}</span></label>`).join('');
+  return `<h2>Plan ${label}</h2>
+    <div class="row wrap" style="margin:-6px 0 12px">
+      <div class="seg">${[[todayStr(), 'Today'], [ymd(addDays(new Date(), 1)), 'Tomorrow']].map(([d, l]) => `<button class="${ds === d ? 'on' : ''}" data-action="plan-date" data-date="${d}">${l}</button>`).join('')}</div>
+      <span class="muted small">${fmtDur(freeMinutes(ds))} free between ${fmtTime(Math.max(fromHHMM(state.settings.dayStart), ds === todayStr() ? Math.ceil(nowMinutes() / 15) * 15 : 0))} and ${fmtTime(fromHHMM(state.settings.dayEnd))}</span>
+    </div>
+    ${planned.length ? `<div class="stack" style="gap:6px">${rows}</div>` : '<div class="empty">Nothing to add. Either everything important is already scheduled, or there’s no free time left.</div>'}
+    ${off ? `<div class="stack" style="gap:6px;margin-top:6px">${off}</div>` : ''}
+    ${skipped.length ? `<p class="small" style="color:var(--danger);margin:12px 0 0">Didn’t fit: ${skipped.map((t) => esc(t.title)).join(', ')}. Try splitting ${skipped.length === 1 ? 'it' : 'them'} into sessions.</p>` : ''}
+    <p class="muted small" style="margin:12px 0 0">Most urgent first, around your busy times, with 10-minute breaks. Untick anything to leave it out.</p>
+    <div class="modal-foot"><span class="spacer"></span><button class="btn" data-action="close-modal">Cancel</button>
+      <button class="btn primary" data-action="plan-apply" ${planned.length ? '' : 'disabled'}>Add ${planned.length} block${planned.length === 1 ? '' : 's'}</button></div>`;
+}
+function openPlanModal(ds = todayStr()) {
+  ui.planDate = ds < todayStr() ? todayStr() : ds;
+  ui.planExclude = new Set();
+  openModal(`<div id="plan-body">${planModalHtml()}</div>`);
+}
+const refreshPlan = () => { const el = $('#plan-body'); if (el) el.innerHTML = planModalHtml(); };
+
+/* ---------- Split into sessions ---------- */
+function splitPlan(t, total, len, finishBy) {
+  const n = Math.max(1, Math.ceil(total / len));
+  const lens = Array.from({ length: n }, (_, i) => (i < n - 1 ? len : total - len * (n - 1)));
+  const start = todayStr(), end = finishBy < start ? start : finishBy;
+  const span = daysBetween(start, end) + 1;
+  // Spread evenly: first session as soon as possible, last on the finish-by day.
+  const dayFor = (i) => ymd(addDays(parse(start), n === 1 ? 0 : Math.round((i * (span - 1)) / (n - 1))));
+  const sessions = [];
+  lens.forEach((dur, i) => {
+    const day = dayFor(i);
+    const slot = findSlot(dur, day, 0, { days: Math.max(1, daysBetween(day, end) + 1), extra: sessions.filter((x) => x.start != null).map((x) => ({ ...x, dur: x.dur + 10 })) });
+    sessions.push(slot && slot.date <= end ? { date: slot.date, start: slot.start, dur } : { date: day, start: null, dur });
+  });
+  return sessions;
+}
+function splitModalHtml(t, total, len, finishBy) {
+  const sessions = splitPlan(t, total, len, finishBy);
+  const totalOpts = [60, 90, 120, 150, 180, 240, 300, 360, 480, 600].concat(total).filter((v, i, a) => a.indexOf(v) === i).sort((a, b) => a - b);
+  return `<h2>Split “${esc(t.title)}” into sessions</h2>
+    <div class="fields" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+      <label class="field">Total time<select class="input" id="split-total" data-split>${totalOpts.map((v) => `<option value="${v}" ${v === total ? 'selected' : ''}>${fmtDur(v)}</option>`).join('')}</select></label>
+      <label class="field">Each session<select class="input" id="split-len" data-split>${[30, 45, 60, 90, 120].map((v) => `<option value="${v}" ${v === len ? 'selected' : ''}>${fmtDur(v)}</option>`).join('')}</select></label>
+      <label class="field">Finish by<input class="input" type="date" id="split-end" data-split value="${finishBy}" min="${todayStr()}"></label>
+    </div>
+    ${t.est && realisticDur(t) !== t.est ? `<p class="muted small" style="margin:8px 0 0">Total is based on your ${fmtDur(t.est)} estimate, adjusted for how long tasks like this usually take you.</p>` : ''}
+    <div class="stack" style="gap:6px;margin-top:14px">${sessions.map((x, i) => `<div class="plan-row" style="--lc:${listColor(t.listId)}">
+      <span class="time">Session ${i + 1}</span>
+      <span class="title">${x.start != null ? `${fmtDate(x.date, { weekday: 'short', month: 'short', day: 'numeric' })}, ${fmtTime(x.start)} – ${fmtTime(x.start + x.dur)}` : `${fmtDate(x.date, { weekday: 'short', month: 'short', day: 'numeric' })}, no free time (left unscheduled)`}</span>
+      <span class="chip">${fmtDur(x.dur)}</span></div>`).join('')}</div>
+    <div class="modal-foot"><span class="spacer"></span><button class="btn" data-action="close-modal">Cancel</button>
+      <button class="btn primary" data-action="split-apply" data-id="${t.id}">Create ${sessions.length} session${sessions.length === 1 ? '' : 's'}</button></div>`;
+}
+function openSplitModal(id) {
+  const t = taskById(id);
+  const total = round15(t.est ? realisticDur(t) : t.block?.dur || 180);
+  const dayBeforeDue = t.due ? ymd(addDays(parse(t.due), -1)) : null;
+  const finishBy = dayBeforeDue && dayBeforeDue >= todayStr() ? dayBeforeDue : t.due && t.due >= todayStr() ? t.due : ymd(addDays(new Date(), 3));
+  ui.split = { id, total, len: total <= 90 ? 30 : 60, finishBy };
+  openModal(`<div id="split-body">${splitModalHtml(t, ui.split.total, ui.split.len, finishBy)}</div>`);
 }
 
 /* Plain-English quick add: "Essay fri 3pm 2h #school !high every week" */
@@ -460,6 +610,8 @@ function taskRow(t) {
   if (t.block) meta.push(`<span class="chip">${ICONS.clock}${fmtDate(t.block.date)} · ${fmtTime(t.block.start)}</span>`);
   else if (t.est) meta.push(`<span class="chip">~${fmtDur(t.est)}</span>`);
   if (t.repeat && t.repeat !== 'none') meta.push(`<span class="chip">↻ ${REPEAT_SHORT[t.repeat]}</span>`);
+  const spent = spentOn(t);
+  if (spent) meta.push(`<span class="chip" data-tip="Tracked with the focus timer">⏱ ${fmtDur(spent)}${t.est ? ` of ~${fmtDur(t.est)}` : ''}</span>`);
   if (t.subtasks.length) meta.push(`<span class="chip">${t.subtasks.filter((s) => s.done).length}/${t.subtasks.length} subtasks</span>`);
   const subs = t.subtasks.length ? `<ul class="subtasks">${t.subtasks.map((s) => `
     <li class="${s.done ? 'done' : ''}"><input type="checkbox" class="check" data-action="toggle-sub" data-id="${t.id}" data-sub="${s.id}" ${s.done ? 'checked' : ''} aria-label="Complete subtask"><span>${esc(s.title)}</span></li>`).join('')}</ul>` : '';
@@ -531,7 +683,9 @@ const TODAY_SECTIONS = {
       return `<div class="sched-item ${t.done ? 'done' : ''} ${isNow ? 'now' : ''}" style="border-left-color:${listColor(t.listId)}" data-action="edit-task" data-id="${t.id}">
         <span class="time">${fmtTime(start)}<br><span class="muted">${fmtTime(start + dur)}</span></span><span class="title">${esc(t.title)}${isNow ? ' <span class="chip">Now</span>' : ''}</span></div>`;
     }).join('')}</div>` : `<div class="empty">Nothing time-blocked yet. Drag tasks onto the calendar.</div>`;
-    return `<section class="card"><div class="card-head"><h2>Schedule</h2><button class="btn sm ghost" data-action="go" data-to="calendar">${ICONS.calendar} Calendar</button></div>${body}</section>`;
+    return `<section class="card"><div class="card-head"><h2>Schedule</h2><div class="row">
+      <button class="btn sm primary" data-action="plan-day">${ICONS.bolt} Plan my day</button>
+      <button class="btn sm ghost" data-action="go" data-to="calendar">${ICONS.calendar} Calendar</button></div></div>${body}</section>`;
   },
   due() {
     const T = todayStr();
@@ -682,7 +836,9 @@ function viewCalendar() {
       <button class="btn sm" data-action="schedule-task" data-id="${t.id}">Schedule</button></div></div>`).join('') || '<div class="empty">Everything is scheduled.</div>'}
   </aside>`;
   const seg = ['day', 'week', 'month'].map((v) => `<button class="${ui.calView === v ? 'on' : ''}" data-action="cal-view" data-view="${v}">${v[0].toUpperCase() + v.slice(1)}</button>`).join('');
-  const toolbar = `<button class="btn icon" data-action="cal-step" data-dir="-1" aria-label="Previous">${ICONS.left}</button>
+  const planFor = ui.calView === 'day' && ui.calDate > todayStr() ? ui.calDate : todayStr();
+  const toolbar = `<button class="btn primary" data-action="plan-day" data-date="${planFor}">${ICONS.bolt} Plan ${planFor === todayStr() ? 'today' : fmtDate(planFor, { weekday: 'short' })}</button>
+    <button class="btn icon" data-action="cal-step" data-dir="-1" aria-label="Previous">${ICONS.left}</button>
     <button class="btn" data-action="cal-today">Today</button>
     <button class="btn icon" data-action="cal-step" data-dir="1" aria-label="Next">${ICONS.right}</button>
     <div class="seg">${seg}</div>`;
@@ -877,6 +1033,21 @@ function completionChart(days, counts) {
   }).join('');
   return `<svg class="chart-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Tasks completed per day, last 14 days">${grid}${bars}</svg>`;
 }
+function estimatesCard() {
+  const rows = state.lists.map((l) => ({ l, xs: estimateSamples(l.id) })).filter((r) => r.xs.length);
+  const all = estimateSamples(null);
+  const tracked = state.pomodoros.filter((p) => p.taskId).reduce((a, p) => a + p.min, 0);
+  const body = rows.length ? rows.sort((a, b) => b.xs.length - a.xs.length).map(({ l, xs }) => {
+    const r = median(xs), pct = Math.round(r * 100);
+    return `<div class="hbar"><span class="row" style="min-width:0"><span class="dot" style="background:var(--c${l.color})"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.name)}</span></span>
+      <div class="track est-track"><div class="fill" style="width:${clamp(r / 2.5, 0, 1) * 100}%;background:var(--c${l.color})" data-tip="${esc(l.name)}: ${pct}% of estimate, from ${xs.length} task${xs.length === 1 ? '' : 's'}"></div><span class="est-mark" style="left:40%"></span></div>
+      <span class="n">${r.toFixed(1)}×</span></div>`;
+  }).join('') : '<div class="empty">No data yet. Set a time estimate, link the task in the focus timer, and check it off when you finish.</div>';
+  return `<section class="card"><div class="card-head"><h2>Estimates vs. actual time</h2><span class="muted small">${fmtDur(tracked)} tracked on tasks</span></div>
+    ${body}
+    ${all.length >= 3 ? `<div class="muted small">Overall, tasks take ${median(all).toFixed(1)}× your estimate. The line marks 1× (right on). Plan my day and Split use these numbers once a list has 3 finished tasks.</div>` : rows.length ? '<div class="muted small">After 3 finished tasks with estimates, Plan my day and Split start adjusting for this.</div>' : ''}
+  </section>`;
+}
 function viewStats() {
   const days14 = lastNDays(14);
   const counts = days14.map((ds) => state.tasks.filter((t) => doneOn(t, ds)).length);
@@ -906,10 +1077,12 @@ function viewStats() {
   return pageHead('Stats', 'How your days are adding up.') +
     `<div class="kpis">${kpi('Completed · 14 days', total)}${kpi('Daily average', (total / 14).toFixed(1))}${kpi('Blocked this week', fmtHours(weekBlocked))}${kpi('Habit consistency · 30 days', `${overall}%`)}${kpi('Focus time · 14 days', fmtHours(focusMin))}</div>
     <div class="stack">
+      ${estimatesCard()}
       <section class="card"><div class="card-head"><h2>Tasks completed · last 14 days</h2><span class="muted small">${total} total</span></div>${completionChart(days14, counts)}</section>
       <div class="grid grid-2">
         <section class="card"><div class="card-head"><h2>Hours blocked by list</h2><div class="seg">${seg}</div></div>
-          ${byList.map(({ l, min }) => `<div class="hbar"><span class="row" style="min-width:0"><span class="dot" style="background:var(--c${l.color})"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.name)}</span></span>
+          ${byList.every((x) => !x.min) ? '<div class="empty">Nothing time-blocked in this period.</div>' : ''}
+          ${byList.filter((x) => x.min).map(({ l, min }) => `<div class="hbar"><span class="row" style="min-width:0"><span class="dot" style="background:var(--c${l.color})"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.name)}</span></span>
             <div class="track"><div class="fill" style="width:${(min / maxMin) * 100}%;background:var(--c${l.color})" data-tip="${esc(l.name)} · ${fmtHours(min)}"></div></div><span class="n">${fmtHours(min)}</span></div>`).join('')}
           <div class="muted small">${fmtHours(totalBlocked)} time-blocked in total</div>
         </section>
@@ -1065,7 +1238,8 @@ function openTaskModal(id, defaults = {}) {
       <label class="field">List<select class="input" name="listId" ${id ? '' : 'data-autosort-target'}>${listOptions(t.listId)}</select></label>
       <label class="field">Priority<select class="input" name="priority">${Object.entries(PRIORITY).map(([v, l]) => `<option value="${v}" ${t.priority === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label class="field">Due date<input class="input" type="date" name="due" value="${t.due || ''}"></label>
-      <label class="field">Time estimate<select class="input" name="est"><option value="">Not set</option>${DURATIONS.map((d) => `<option value="${d}" ${t.est === d ? 'selected' : ''}>${fmtDur(d)}</option>`).join('')}</select></label>
+      <label class="field">Time estimate<select class="input" name="est"><option value="">Not set</option>${[...new Set([...DURATIONS, 300, 360, 480, ...(t.est ? [t.est] : [])])].sort((a, b) => a - b).map((d) => `<option value="${d}" ${t.est === d ? 'selected' : ''}>${fmtDur(d)}</option>`).join('')}</select>
+        ${ratioHint(t.listId) ? `<span class="hint">${ratioHint(t.listId)}</span>` : ''}${id && spentOn(t) ? `<span class="hint">⏱ ${fmtDur(spentOn(t))} tracked so far</span>` : ''}</label>
       <label class="field">Repeat<select class="input" name="repeat">${Object.entries(REPEAT).map(([v, l]) => `<option value="${v}" ${(t.repeat || 'none') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label class="field full">Calendar<span class="row" style="height:36px;font-weight:500;color:var(--text)"><input type="checkbox" class="check" name="blocked" data-action="toggle-block-fields" ${t.block ? 'checked' : ''}> Time-block this task</span></label>
       <div class="full fields ${t.block ? '' : 'hidden'}" id="block-fields" style="grid-template-columns:repeat(3,minmax(0,1fr))">
@@ -1084,6 +1258,7 @@ function openTaskModal(id, defaults = {}) {
     </div>
     <div class="modal-foot">
       ${id ? `<button type="button" class="btn danger" data-action="delete-task" data-id="${id}">Delete</button>` : ''}
+      ${id && !t.done && !t.parentId && !hasOpenSessions(t) ? `<button type="button" class="btn" data-action="split-task" data-id="${id}">Split into sessions</button>` : ''}
       <span class="spacer"></span>
       <button type="button" class="btn" data-action="close-modal">Cancel</button>
       <button class="btn primary">Save</button>
@@ -1228,16 +1403,53 @@ function commit(msg) { save(); closeModal(); render(); if (msg) toast(msg); }
    ========================================================= */
 const ACTIONS = {
   'toggle-nav': () => app.classList.toggle('nav-open'),
+  'plan-day': (el) => openPlanModal(el.dataset.date || todayStr()),
+  'plan-date': (el) => { ui.planDate = el.dataset.date; ui.planExclude = new Set(); refreshPlan(); },
+  'plan-apply': () => {
+    const { planned } = planDay(ui.planDate, ui.planExclude);
+    if (!planned.length) return;
+    const undo = snapshot();
+    planned.forEach((p) => { p.t.block = { date: p.date, start: p.start, dur: p.dur }; });
+    closeModal(); save(); render();
+    toast(`Planned ${planned.length} block${planned.length === 1 ? '' : 's'} for ${ui.planDate === todayStr() ? 'today' : fmtDate(ui.planDate, { weekday: 'long' })}`, undo);
+  },
+  'split-task': (el) => openSplitModal(el.dataset.id),
+  'split-apply': (el) => {
+    const t = taskById(el.dataset.id), { total, len, finishBy } = ui.split;
+    const sessions = splitPlan(t, total, len, finishBy);
+    const undo = snapshot();
+    sessions.forEach((x, i) => {
+      const subId = uid();
+      t.subtasks.push({ id: subId, title: `Session ${i + 1} of ${sessions.length} (${fmtDate(x.date, { weekday: 'short', month: 'short', day: 'numeric' })})`, done: false });
+      state.tasks.push({
+        id: uid(), title: `${t.title} (${i + 1}/${sessions.length})`, listId: t.listId, priority: t.priority, due: x.date, done: false, doneAt: null,
+        notes: `Session ${i + 1} of ${sessions.length} for “${t.title}”.`, subtasks: [], repeat: 'none', est: x.dur, createdAt: Date.now(),
+        block: x.start != null ? { date: x.date, start: x.start, dur: x.dur } : null, parentId: t.id, subId,
+      });
+    });
+    t.block = null;
+    closeModal(); save(); render();
+    toast(`Split into ${sessions.length} session${sessions.length === 1 ? '' : 's'}`, undo);
+  },
   'confirm-yes': () => { const fn = pendingConfirm; closeModal(); fn?.(); },
 
-  'timer-mode': (el) => { Object.assign(ui.timer, { mode: el.dataset.mode, left: TIMER_MODES[el.dataset.mode][1] * 60, running: false }); render(); },
+  'timer-mode': (el) => { logPartialFocus(); Object.assign(ui.timer, { mode: el.dataset.mode, left: TIMER_MODES[el.dataset.mode][1] * 60, running: false }); render(); },
   'timer-toggle': () => {
     const tm = ui.timer;
     if (tm.running) { tm.left = Math.max(0, Math.ceil((tm.endAt - Date.now()) / 1000)); tm.running = false; }
-    else { tm.endAt = Date.now() + tm.left * 1000; tm.running = true; }
+    else {
+      // Nothing linked? Use whatever is on the calendar right now.
+      if (!tm.taskId && tm.mode === 'focus') {
+        const now = nowMinutes();
+        const cur = state.tasks.find((t) => !t.done && t.block?.date === todayStr() && t.block.start <= now && now < t.block.start + t.block.dur);
+        if (cur) { tm.taskId = cur.id; toast(`Timing “${cur.title}”`); }
+      }
+      tm.endAt = Date.now() + tm.left * 1000;
+      tm.running = true;
+    }
     render();
   },
-  'timer-reset': () => { Object.assign(ui.timer, { left: TIMER_MODES[ui.timer.mode][1] * 60, running: false }); render(); },
+  'timer-reset': () => { logPartialFocus(); Object.assign(ui.timer, { left: TIMER_MODES[ui.timer.mode][1] * 60, running: false }); render(); },
   go: (el) => { location.hash = el.dataset.to; },
   lock: () => lock(),
   'close-modal': () => closeModal(),
@@ -1248,8 +1460,9 @@ const ACTIONS = {
   'delete-task': (el) => {
     const t = taskById(el.dataset.id);
     if (!t) return;
-    askConfirm(`Delete “${t.title}”?`, 'Delete', () => {
-      state.tasks = state.tasks.filter((x) => x !== t);
+    const sessions = state.tasks.filter((x) => x.parentId === t.id && !x.done);
+    askConfirm(sessions.length ? `Delete “${t.title}” and its ${sessions.length} open session${sessions.length === 1 ? '' : 's'}?` : `Delete “${t.title}”?`, 'Delete', () => {
+      state.tasks = state.tasks.filter((x) => x !== t && !sessions.includes(x));
       commit('Task deleted');
     });
   },
@@ -1257,6 +1470,9 @@ const ACTIONS = {
     const t = taskById(el.dataset.id);
     t.done = !t.done;
     t.doneAt = t.done ? Date.now() : null;
+    const parent = t.parentId && taskById(t.parentId);
+    const parentSub = parent && parent.subtasks.find((x) => x.id === t.subId);
+    if (parentSub) parentSub.done = t.done;
     let next = null;
     if (t.done) {
       t.subtasks.forEach((s) => { s.done = true; });
@@ -1268,7 +1484,8 @@ const ACTIONS = {
       else if (!n) t.nextId = null;
     }
     save(); render();
-    if (next) toast(`Done. Next one is ${fmtDate(next.due || next.block.date, { weekday: 'short', month: 'short', day: 'numeric' })}`);
+    if (parent && t.done && !hasOpenSessions(parent)) toast(`That was the last session of “${parent.title}”`);
+    else if (next) toast(`Done. Next one is ${fmtDate(next.due || next.block.date, { weekday: 'short', month: 'short', day: 'numeric' })}`);
     else if (t.done) toast('Nice, task completed');
   },
   'toggle-sub': (el) => {
@@ -1618,6 +1835,14 @@ document.addEventListener('change', (e) => {
     state.settings[t.dataset.setting] = t.value;
     if (state.settings.dayEnd <= state.settings.dayStart) { toast('The day has to end after it starts'); state.settings.dayEnd = '22:00'; render(); }
     save();
+  } else if (t.dataset.planToggle) {
+    if (t.checked) ui.planExclude.delete(t.dataset.planToggle); else ui.planExclude.add(t.dataset.planToggle);
+    refreshPlan();
+  } else if (t.hasAttribute('data-split') && ui.split) {
+    ui.split.total = +$('#split-total').value;
+    ui.split.len = +$('#split-len').value;
+    if ($('#split-end').value) ui.split.finishBy = $('#split-end').value;
+    $('#split-body').innerHTML = splitModalHtml(taskById(ui.split.id), ui.split.total, ui.split.len, ui.split.finishBy);
   } else if (t.hasAttribute('data-timer-task')) {
     ui.timer.taskId = t.value;
   } else if (t.hasAttribute('data-note-listfilter')) {
@@ -1838,6 +2063,16 @@ function chime() {
     });
   } catch (_) { /* no audio */ }
 }
+// A focus session stopped early still counts toward the linked task, from one minute up.
+function logPartialFocus() {
+  const tm = ui.timer;
+  if (tm.mode !== 'focus') return;
+  if (tm.running) tm.left = Math.max(0, Math.ceil((tm.endAt - Date.now()) / 1000));
+  const min = Math.floor((TIMER_MODES.focus[1] * 60 - tm.left) / 60);
+  if (min < 1) return;
+  state.pomodoros.push({ at: Date.now(), min, taskId: tm.taskId || null, partial: true });
+  save();
+}
 function finishTimer() {
   const tm = ui.timer;
   tm.running = false;
@@ -1845,7 +2080,7 @@ function finishTimer() {
   if (tm.mode === 'focus') {
     state.pomodoros.push({ at: Date.now(), min: TIMER_MODES.focus[1], taskId: tm.taskId || null });
     save();
-    const n = state.pomodoros.filter((p) => ymd(new Date(p.at)) === todayStr()).length;
+    const n = state.pomodoros.filter((p) => !p.partial && ymd(new Date(p.at)) === todayStr()).length;
     next = n % 4 === 0 ? 'long' : 'short';
     msg = `Focus session done. Time for a ${next === 'long' ? 'long' : 'short'} break.`;
   }
