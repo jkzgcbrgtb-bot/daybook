@@ -287,12 +287,50 @@ function completeTask(s, t) {
   s.tasks.push(copy);
   return copy;
 }
-function streak(h) {
-  let d = today();
-  if (!h.log[d]) d = addDays(d, -1);
-  let n = 0;
-  while (h.log[d]) { n++; d = addDays(d, -1); }
-  return n;
+/* ---------- habits (mirrors app.js) ---------- */
+const habitMode = (h) => (Array.isArray(h.days) && h.days.length ? 'days' : 'weekly');
+const scheduledOn = (h, ds) => habitMode(h) === 'weekly' || h.days.includes(weekday(ds));
+const mondayOf = (ds) => addDays(ds, -((weekday(ds) + 6) % 7));
+function weekCount(h, ds = today()) { const m = mondayOf(ds); let n = 0; for (let i = 0; i < 7; i++) if (h.log[addDays(m, i)]) n++; return n; }
+const weekTarget = (h) => (habitMode(h) === 'days' ? h.days.length : h.goal);
+function dueToday(h) {
+  const T = today();
+  if (h.log[T]) return true;
+  return habitMode(h) === 'days' ? scheduledOn(h, T) : weekCount(h) < h.goal;
+}
+function streakInfo(h) {
+  const T = today(), logged = Object.keys(h.log).filter((d) => h.log[d]).sort();
+  const unit = habitMode(h) === 'days' ? 'day' : 'week';
+  if (!logged.length) return { current: 0, best: 0, unit };
+  let run = 0, best = 0;
+  if (unit === 'day') {
+    for (let ds = logged[0]; ds <= T; ds = addDays(ds, 1)) {
+      if (!scheduledOn(h, ds)) continue;
+      if (h.log[ds]) best = Math.max(best, ++run); else if (ds !== T) run = 0;
+    }
+  } else {
+    const thisWeek = mondayOf(T);
+    for (let w = mondayOf(logged[0]); w <= thisWeek; w = addDays(w, 7)) {
+      if (weekCount(h, w) >= h.goal) best = Math.max(best, ++run); else if (w !== thisWeek) run = 0;
+    }
+  }
+  return { current: run, best, unit };
+}
+function scheduleLabel(h) {
+  if (habitMode(h) === 'weekly') return `${h.goal}x a week`;
+  const key = [...h.days].sort().join('');
+  if (key === '0123456') return 'every day';
+  if (key === '12345') return 'weekdays';
+  return [1, 2, 3, 4, 5, 6, 0].filter((d) => h.days.includes(d)).map((d) => WEEKDAYS[d]).join(', ');
+}
+function habitView(s, h) {
+  const info = streakInfo(h), T = today();
+  return {
+    id: h.id, name: h.name, schedule: scheduleLabel(h), color_list: listName(s, h.listId), reminder: h.reminder || null,
+    due_today: dueToday(h), done_today: !!h.log[T],
+    streak: info.unit === 'week' ? `${info.current} week(s) in a row with the goal met` : `${info.current} due day(s) in a row`, best_streak: info.best,
+    this_week: `${weekCount(h)}/${weekTarget(h)}`,
+  };
 }
 
 /* ---------- field application shared by add-task and update-task ---------- */
@@ -352,7 +390,8 @@ const COMMANDS = {
       due_next_7_days: open.filter((t) => t.due > T && t.due <= addDays(T, 7)).sort(taskSort).map((t) => taskView(s, t)),
       missed_blocks: open.filter((t) => t.block && t.block.date < T).map((t) => taskView(s, t)),
       schedule,
-      habits: s.habits.map((h) => ({ id: h.id, name: h.name, done_today: !!h.log[T], streak_days: streak(h), weekly_goal: h.goal })),
+      habits_due_today: s.habits.filter(dueToday).map((h) => habitView(s, h)),
+      habits_resting_today: s.habits.filter((h) => !dueToday(h)).map((h) => h.name),
       goals: s.goals.map((g) => ({ id: g.id, title: g.title, current: g.current, target: g.target, unit: g.unit })),
       open_tasks: open.length, unscheduled_open_tasks: open.filter((t) => !t.block).length,
     };
@@ -518,8 +557,8 @@ const COMMANDS = {
     const { state: s } = await v.read();
     const T = today();
     return s.habits.map((h) => ({
-      id: h.id, name: h.name, weekly_goal: h.goal, reminder: h.reminder || null, done_today: !!h.log[T], streak_days: streak(h),
-      last_7_days: Array.from({ length: 7 }, (_, i) => addDays(T, i - 6)).map((d) => ({ date: d, done: !!h.log[d] })),
+      ...habitView(s, h),
+      last_7_days: Array.from({ length: 7 }, (_, i) => addDays(T, i - 6)).map((d) => ({ date: d, done: !!h.log[d], rest_day: !scheduledOn(h, d) })),
     }));
   },
 
@@ -531,7 +570,7 @@ const COMMANDS = {
         || fail(`No habit "${ref}". Habits: ${s.habits.map((x) => x.name).join(', ')}`);
       const d = args.date ? checkDate(args.date) : today();
       if (args.undo) delete h.log[d]; else h.log[d] = true;
-      return { habit: h.name, date: d, done: !!h.log[d], streak_days: streak(h) };
+      return { habit: h.name, date: d, done: !!h.log[d], ...(scheduledOn(h, d) ? {} : { note: 'That was a rest day for this habit, so it counts as a bonus.' }), streak: habitView(s, h).streak };
     });
   },
 

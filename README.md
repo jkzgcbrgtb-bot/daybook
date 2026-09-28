@@ -33,7 +33,11 @@ The default passcode is **1234**. You can change it in Settings → Security.
 - **Busy times** (Settings → Schedule): repeating weekly blocks, such as a class timetable, that show on the calendar and are never scheduled over.
 - **Tasks**: search, plus filters for list, priority, due date and status. Add, edit and delete tasks and their subtasks. Tasks can repeat daily, on weekdays, weekly or monthly, and completing one creates the next occurrence.
 - **Notes**: search with highlighting, auto-save, and linking to a list (with a jump to that list's open tasks).
-- **Habits**: 7-day tick grid, streaks, weekly goals, reminder times (browser notifications or in-app toasts), goals with +/− progress, and an auto-saving weekly review with a summary of the week.
+- **Habits**:
+  - Each habit runs on specific days (Mon/Wed/Fri) or a number of times per week, has a list color and a reminder time, and can be added from one-tap templates (Lift, Tennis practice, Golf range, Latin vocab review and more).
+  - Streaks skip rest days. For "× a week" habits they count weeks in a row with the goal met, and each habit shows its best streak.
+  - Today shows only the habits due today, grouped Morning, Afternoon, Evening or Anytime, as large tap targets.
+  - The Habits page also has a 7-day grid (rest days are dashed, and ticking one counts as a bonus), goals, and an auto-saving weekly review.
 - **Stats**: 14-day completion chart, focus time, hours blocked by list (this week or last 30 days), and a 30-day habit consistency heatmap.
 - **Settings**: theme, density, five accent colors, dashboard section order and visibility, nav item visibility, passcode change, lists, and JSON export, import and reset.
 
