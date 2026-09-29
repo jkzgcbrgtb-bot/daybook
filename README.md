@@ -17,6 +17,10 @@ The default passcode is **1234**. You can change it in Settings → Security.
 - **Lock screen**: the app stays blurred behind a passcode keypad. A wrong code shakes the dots and shows an error, and 5 misses trigger a 30-second cooldown. You can lock from the sidebar, the mobile top bar, or Settings.
 - **Today**: focus line, a focus timer (25-minute focus sessions with 5- and 15-minute breaks, optionally linked to a task), today's time blocks (the current one is highlighted), due and overdue tasks with subtasks, quick add, habit check-offs, and goal progress bars.
 - **Calendar**: day, week and month views. Drag an unscheduled task onto the grid to time-block it, or press **Schedule** on touch devices. Drag blocks to move them, or drop one back on the tray to unschedule it. Click a block to edit it, or an empty slot to create a task.
+- **Tasks vs. events**:
+  - **Tasks** live in lists, can be time-blocked, and get checked off. Scheduled tasks have a check circle right on their calendar block.
+  - **Events** are added by clicking an empty time or with **New event** (for example a match, an appointment or a party). They only sit on the calendar: no checkbox, never crossed off, not in task lists.
+  - Both block time for Next free slot and Plan my day, and either can be turned into the other.
 - **Scheduling helpers**:
   - Quick add understands plain English, like `essay fri 3pm 2h #school !high every week`, and shows a preview as you type.
   - Tasks can have a time estimate.

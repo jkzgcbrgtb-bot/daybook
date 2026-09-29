@@ -171,7 +171,7 @@ class Vault {
 }
 function normalize(s) {
   s.settings = { dayStart: '08:00', dayEnd: '22:00', ...(s.settings || {}) };
-  for (const k of ['lists', 'tasks', 'notes', 'habits', 'goals', 'busy', 'pomodoros']) if (!Array.isArray(s[k])) s[k] = [];
+  for (const k of ['lists', 'tasks', 'notes', 'habits', 'goals', 'busy', 'pomodoros', 'events']) if (!Array.isArray(s[k])) s[k] = [];
   if (!s.lists.length) s.lists.push({ id: 'l-inbox', name: 'Inbox', color: 1 });
   s.focus = s.focus || {};
   s.tasks.forEach((t) => { t.subtasks = t.subtasks || []; t.repeat = t.repeat || 'none'; t.priority = t.priority || 'none'; });
@@ -236,6 +236,7 @@ const busyOn = (s, ds) => s.busy.filter((b) => b.days.includes(weekday(ds)));
 function occupied(s, ds, excludeId) {
   return [
     ...s.tasks.filter((t) => t.block && t.block.date === ds && t.id !== excludeId).map((t) => ({ start: t.block.start, end: t.block.start + t.block.dur })),
+    ...s.events.filter((e) => e.date === ds && e.id !== excludeId).map((e) => ({ start: e.start, end: e.start + e.dur })),
     ...busyOn(s, ds).map((b) => ({ start: b.start, end: b.end })),
   ].sort((a, b) => a.start - b.start);
 }
@@ -361,6 +362,24 @@ function applyTaskFields(s, t, args) {
   if (!t.title) fail('A task needs a title');
 }
 
+/* ---------- events: calendar-only items, never checked off, not in task lists ---------- */
+function eventView(s, e) {
+  return { id: e.id, title: e.title, date: e.date, weekday: WEEKDAYS[weekday(e.date)], start: toHHMM(e.start), end: toHHMM(e.start + e.dur), color_list: listName(s, e.listId), ...(e.notes ? { notes: e.notes } : {}) };
+}
+function applyEventFields(s, ev, args) {
+  if (typeof args.title === 'string') ev.title = args.title.trim();
+  if (args.date) ev.date = checkDate(args.date);
+  if (args.time) ev.start = fromHHMM(args.time);
+  if (args.end) ev.dur = fromHHMM(args.end) - ev.start;
+  else if (args.minutes) ev.dur = parseInt(args.minutes, 10);
+  else if (!ev.dur) ev.dur = 60;
+  if (!(ev.dur > 0)) fail('The event has to end after it starts');
+  if (args.list) ev.listId = args.list === 'none' ? null : listByName(s, args.list).id;
+  const notes = text(args, 'notes');
+  if (typeof notes === 'string') ev.notes = notes;
+  if (!ev.title) fail('An event needs a title');
+}
+
 /* ---------- commands ---------- */
 const COMMANDS = {
   async connect(args) {
@@ -379,6 +398,7 @@ const COMMANDS = {
     const T = args.date && args.date !== true ? checkDate(args.date) : today();
     const schedule = [
       ...s.tasks.filter((t) => t.block?.date === T).map((t) => ({ start: toHHMM(t.block.start), end: toHHMM(t.block.start + t.block.dur), title: t.title, task_id: t.id, done: t.done })),
+      ...s.events.filter((e) => e.date === T).map((e) => ({ start: toHHMM(e.start), end: toHHMM(e.start + e.dur), title: e.title, event_id: e.id })),
       ...busyOn(s, T).map((b) => ({ start: toHHMM(b.start), end: toHHMM(b.end), title: b.title, busy: true })),
     ].sort((a, b) => (a.start < b.start ? -1 : 1));
     const open = s.tasks.filter((t) => !t.done);
@@ -474,6 +494,42 @@ const COMMANDS = {
       from = slot.date; fromMin = slot.start + dur;
     }
     return { minutes: dur, day_hours: `${s.settings.dayStart}–${s.settings.dayEnd}`, slots: out };
+  },
+
+  async events(args, v) {
+    const { state: s } = await v.read();
+    const from = args.from ? checkDate(args.from) : today(), to = args.to ? checkDate(args.to) : addDays(from, 13);
+    return s.events.filter((e) => e.date >= from && e.date <= to).sort((a, b) => (a.date + toHHMM(a.start) < b.date + toHHMM(b.start) ? -1 : 1)).map((e) => eventView(s, e));
+  },
+
+  async 'add-event'(args, v) {
+    if (typeof args.title !== 'string' || !args.date || !args.time) fail('Usage: add-event --title "..." --date YYYY-MM-DD --time HH:MM (--end HH:MM | --minutes N) [--list name] [--notes "..."]');
+    return v.mutate((s) => {
+      const ev = { id: uid(), title: args.title.trim(), listId: null, notes: '', createdAt: Date.now(), createdBy: 'claude' };
+      applyEventFields(s, ev, args);
+      if (!args.list) ev.listId = detectList(ev.title, s.lists)?.id || null;
+      s.events.push(ev);
+      const clash = occupied(s, ev.date, ev.id).find((o) => o.start < ev.start + ev.dur && o.end > ev.start);
+      return { added: eventView(s, ev), ...(clash ? { warning: `Overlaps something from ${toHHMM(clash.start)} to ${toHHMM(clash.end)}` } : {}) };
+    });
+  },
+
+  async 'update-event'(args, v) {
+    const id = args._[1] || fail('Usage: update-event <id> [--title T] [--date D] [--time HH:MM] [--end HH:MM | --minutes N] [--list L] [--notes T]');
+    return v.mutate((s) => {
+      const ev = byId(s.events, id, 'event');
+      applyEventFields(s, ev, args);
+      return { updated: eventView(s, ev) };
+    });
+  },
+
+  async 'delete-event'(args, v) {
+    const id = args._[1] || fail('Usage: delete-event <id>');
+    return v.mutate((s) => {
+      const ev = byId(s.events, id, 'event');
+      s.events = s.events.filter((x) => x !== ev);
+      return { deleted: ev.title };
+    });
   },
 
   async 'delete-task'(args, v) {
@@ -625,6 +681,9 @@ const HELP = `Daybook tool. Commands (all print JSON):
   schedule <id> (--next-free [--from D] [--after HH:MM] | --date D --time HH:MM) [--minutes N]
   free-slots [--date D] [--minutes N] [--count N]
   delete-task <id>
+  events [--from D] [--to D]              Calendar events (appointments, matches…), next 2 weeks by default
+  add-event --title T --date D --time HH:MM (--end HH:MM | --minutes N) [--list L] [--notes T]
+  update-event <id> [same fields]  |  delete-event <id>
   notes [--search Q] [--list L]  |  note <id>
   add-note --title T (--body T | --body-file F) [--list L]
   update-note <id> [--title T] [--body T | --body-file F] [--append T | --append-file F]

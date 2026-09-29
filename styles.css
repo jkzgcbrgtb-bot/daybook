@@ -482,3 +482,19 @@ div.plan-row { grid-template-columns: 80px minmax(0, 1fr) auto; }
 .seg label:has(input:checked) { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
 .seg label:has(input:focus-visible) { outline: 2px solid var(--accent); }
 @media (max-width: 800px) { .habit-row { grid-template-columns: 28px minmax(0, 1fr); } .habit-meta { grid-column: 2; } }
+
+/* ---------- Events vs tasks on the calendar ---------- */
+.block.event { background: color-mix(in srgb, var(--bc) 30%, var(--surface)); border-left-width: 0; box-shadow: inset 3px 0 0 var(--bc), 0 0 0 1.5px var(--surface); }
+.block.event b { font-weight: 700; }
+.block.task-block b { display: flex; align-items: center; gap: 5px; }
+.block .blk-check {
+  display: inline-grid; place-items: center; flex: none; width: 13px; height: 13px; border-radius: 50%;
+  border: 1.5px solid var(--bc); background: var(--surface); color: #fff; cursor: pointer;
+}
+.block .blk-check svg { width: 9px; height: 9px; }
+.block.done .blk-check { background: var(--bc); }
+.block .blk-check:hover { box-shadow: 0 0 0 3px color-mix(in srgb, var(--bc) 25%, transparent); }
+.mchip.event { background: color-mix(in srgb, var(--bc) 30%, var(--surface)); font-weight: 600; }
+.mchip.done { text-decoration: line-through; color: var(--muted); }
+.sched-item.event { background: color-mix(in srgb, var(--bc) 22%, var(--surface)); font-weight: 600; }
+.sched-item .check { width: 16px; height: 16px; }

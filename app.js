@@ -93,6 +93,7 @@ function emptyState() {
     reviews: {},
     pomodoros: [],
     busy: [],
+    events: [],
   };
 }
 
@@ -176,7 +177,7 @@ function load() {
 function normalize(s) {
   const base = emptyState();
   const out = { ...base, ...s, settings: { ...base.settings, ...(s.settings || {}) } };
-  for (const k of ['lists', 'tasks', 'notes', 'habits', 'goals', 'pomodoros', 'busy']) if (!Array.isArray(out[k])) out[k] = [];
+  for (const k of ['lists', 'tasks', 'notes', 'habits', 'goals', 'pomodoros', 'busy', 'events']) if (!Array.isArray(out[k])) out[k] = [];
   if (!out.lists.length) out.lists = base.lists;
   const known = new Set(out.settings.sections.map((x) => x.id));
   Object.keys(SECTIONS).forEach((id) => {
@@ -365,10 +366,27 @@ const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const taskDur = (t) => t.block?.dur || t.est || 60;
 const fmtDur = (m) => (m < 60 ? `${m} min` : m % 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m / 60} h`);
 const busyOn = (ds) => { const wd = parse(ds).getDay(); return state.busy.filter((b) => b.days.includes(wd)); };
+/* Events are things placed straight on the calendar (a match, an appointment): they block time
+   but have no checkbox, never get crossed off, and never appear in task lists. */
+const eventById = (id) => state.events.find((e) => e.id === id);
+const eventsOn = (ds) => state.events.filter((e) => e.date === ds).sort((a, b) => a.start - b.start);
+const eventColor = (ev) => (ev.listId && listById(ev.listId) ? `var(--c${listById(ev.listId).color})` : 'var(--accent)');
+// Calendar items are keyed "t:<id>" for tasks and "e:<id>" for events, so drag and resize handle both.
+function calItem(key) {
+  const [kind, id] = [key.slice(0, 1), key.slice(2)];
+  if (kind === 'e') { const ev = eventById(id); return ev && { kind, obj: ev, title: ev.title, block: ev }; }
+  const t = taskById(id);
+  return t && { kind, obj: t, title: t.title, block: t.block };
+}
+function placeItem(item, date, start, dur) {
+  if (item.kind === 'e') Object.assign(item.obj, { date, start, dur });
+  else item.obj.block = { date, start, dur };
+}
 // `extra` holds blocks being planned but not saved yet ({date, start, dur}).
 function occupied(ds, excludeId, extra = []) {
   return [
     ...state.tasks.filter((t) => t.block && t.block.date === ds && t.id !== excludeId).map((t) => ({ start: t.block.start, end: t.block.start + t.block.dur })),
+    ...eventsOn(ds).filter((e) => e.id !== excludeId).map((e) => ({ start: e.start, end: e.start + e.dur })),
     ...busyOn(ds).map((b) => ({ start: b.start, end: b.end })),
     ...extra.filter((x) => x.date === ds).map((x) => ({ start: x.start, end: x.start + x.dur })),
   ].sort((a, b) => a.start - b.start);
@@ -804,17 +822,23 @@ const TODAY_SECTIONS = {
     const T = todayStr(), now = nowMinutes();
     const items = [
       ...state.tasks.filter((t) => t.block && t.block.date === T),
+      ...eventsOn(T).map((ev) => ({ ev, block: ev })),
       ...busyOn(T).map((b) => ({ busy: b, block: { start: b.start, dur: b.end - b.start } })),
     ].sort((a, b) => a.block.start - b.block.start);
     const body = items.length ? `<div class="sched">${items.map((t) => {
       const { start, dur } = t.block;
       const isNow = now >= start && now < start + dur;
+      if (t.ev) {
+        return `<div class="sched-item event ${isNow ? 'now' : ''}" style="--bc:${eventColor(t.ev)};border-left-color:var(--bc)" data-action="edit-event" data-id="${t.ev.id}">
+          <span class="time">${fmtTime(start)}<br><span class="muted">${fmtTime(start + dur)}</span></span><span class="title">${esc(t.ev.title)}${isNow ? ' <span class="chip">Now</span>' : ''}</span></div>`;
+      }
       if (t.busy) {
         return `<div class="sched-item busy ${isNow ? 'now' : ''}" data-action="edit-busy" data-id="${t.busy.id}">
           <span class="time">${fmtTime(start)}<br><span class="muted">${fmtTime(start + dur)}</span></span><span class="title">${esc(t.busy.title)}</span></div>`;
       }
       return `<div class="sched-item ${t.done ? 'done' : ''} ${isNow ? 'now' : ''}" style="border-left-color:${listColor(t.listId)}" data-action="edit-task" data-id="${t.id}">
-        <span class="time">${fmtTime(start)}<br><span class="muted">${fmtTime(start + dur)}</span></span><span class="title">${esc(t.title)}${isNow ? ' <span class="chip">Now</span>' : ''}</span></div>`;
+        <span class="time">${fmtTime(start)}<br><span class="muted">${fmtTime(start + dur)}</span></span>
+        <span class="title row" style="gap:8px"><input type="checkbox" class="check round" data-action="toggle-task" data-id="${t.id}" ${t.done ? 'checked' : ''} aria-label="Complete ${esc(t.title)}"><span>${esc(t.title)}</span>${isNow ? ' <span class="chip">Now</span>' : ''}</span></div>`;
     }).join('')}</div>` : `<div class="empty">Nothing time-blocked yet. Drag tasks onto the calendar.</div>`;
     return `<section class="card"><div class="card-head"><h2>Schedule</h2><div class="row">
       <button class="btn sm primary" data-action="plan-day">${ICONS.bolt} Plan my day</button>
@@ -927,6 +951,7 @@ function timeGrid(days) {
     // Tasks and recurring busy times share lanes so overlaps sit side by side.
     const items = [
       ...state.tasks.filter((t) => t.block && t.block.date === ds).map((t) => ({ t, block: t.block })),
+      ...eventsOn(ds).map((ev) => ({ ev, block: ev })),
       ...busyOn(ds).map((b) => ({ busy: b, block: { start: b.start, dur: b.end - b.start } })),
     ].sort((a, b) => a.block.start - b.block.start || b.block.dur - a.block.dur);
     const blocks = layoutDay(items).map(({ t: item, lane, lanes }) => {
@@ -936,10 +961,17 @@ function timeGrid(days) {
       if (item.busy) {
         return `<div class="block busy" data-action="edit-busy" data-id="${item.busy.id}" style="${pos}" title="${esc(item.busy.title)}"><b>${esc(item.busy.title)}</b>${time}</div>`;
       }
+      if (item.ev) {
+        const ev = item.ev;
+        return `<div class="block event" draggable="true" data-drag="e:${ev.id}" data-action="edit-event" data-id="${ev.id}"
+          style="--bc:${eventColor(ev)};${pos}" title="${esc(ev.title)} (event)"><b>${esc(ev.title)}</b>${time}
+          <span class="resize" data-resize="e:${ev.id}" aria-hidden="true"></span></div>`;
+      }
       const t = item.t;
-      return `<div class="block ${t.done ? 'done' : ''}" draggable="true" data-drag="${t.id}" data-action="edit-task" data-id="${t.id}"
-        style="--bc:${listColor(t.listId)};${pos}" title="${esc(t.title)}"><b>${esc(t.title)}</b>${time}
-        <span class="resize" data-resize="${t.id}" aria-hidden="true"></span></div>`;
+      return `<div class="block task-block ${t.done ? 'done' : ''}" draggable="true" data-drag="t:${t.id}" data-action="edit-task" data-id="${t.id}"
+        style="--bc:${listColor(t.listId)};${pos}" title="${esc(t.title)} (task)">
+        <b><span class="blk-check" role="checkbox" aria-checked="${t.done}" aria-label="Complete ${esc(t.title)}" data-action="toggle-task" data-id="${t.id}">${t.done ? ICONS.check : ''}</span>${esc(t.title)}</b>${time}
+        <span class="resize" data-resize="t:${t.id}" aria-hidden="true"></span></div>`;
     }).join('');
     const nowLine = ds === T ? `<div class="now-line" style="top:calc(var(--hour) * ${nowMinutes() / 60})"></div>` : '';
     return `<div class="day-col ${ds === T ? 'is-today' : ''}" data-day="${ds}" data-action="slot" style="height:calc(var(--hour) * 24)">${blocks}${nowLine}</div>`;
@@ -959,8 +991,11 @@ function monthGrid() {
     const day = addDays(start, i), ds = ymd(day);
     const blocked = state.tasks.filter((t) => t.block && t.block.date === ds).sort((a, b) => a.block.start - b.block.start);
     const dueOnly = state.tasks.filter((t) => !t.block && !t.done && t.due === ds);
-    const all = [...blocked, ...dueOnly];
-    const chips = all.slice(0, 3).map((t) => `<div class="mchip" style="--bc:${listColor(t.listId)}" draggable="true" data-drag="${t.id}" data-action="edit-task" data-id="${t.id}" title="${esc(t.title)}">${t.block ? `${fmtTime(t.block.start).replace(':00', '')} ` : ''}${esc(t.title)}</div>`).join('');
+    const all = [...blocked, ...eventsOn(ds).map((ev) => ({ ev })), ...dueOnly]
+      .sort((a, b) => (a.ev ? a.ev.start : a.block ? a.block.start : 9999) - (b.ev ? b.ev.start : b.block ? b.block.start : 9999));
+    const chips = all.slice(0, 3).map((x) => x.ev
+      ? `<div class="mchip event" style="--bc:${eventColor(x.ev)}" draggable="true" data-drag="e:${x.ev.id}" data-action="edit-event" data-id="${x.ev.id}" title="${esc(x.ev.title)} (event)">${fmtTime(x.ev.start).replace(':00', '')} ${esc(x.ev.title)}</div>`
+      : `<div class="mchip ${x.done ? 'done' : ''}" style="--bc:${listColor(x.listId)}" draggable="true" data-drag="t:${x.id}" data-action="edit-task" data-id="${x.id}" title="${esc(x.title)}">${x.block ? `${fmtTime(x.block.start).replace(':00', '')} ` : ''}${esc(x.title)}</div>`).join('');
     const more = all.length > 3 ? `<div class="muted small">+${all.length - 3} more</div>` : '';
     return `<div class="mcell ${day.getMonth() !== d.getMonth() ? 'other' : ''} ${ds === T ? 'is-today' : ''}" data-action="open-day" data-day="${ds}"><div class="mnum">${day.getDate()}</div>${chips}${more}</div>`;
   }).join('');
@@ -970,9 +1005,9 @@ function viewCalendar() {
   const unscheduled = state.tasks.filter((t) => !t.done && !t.block).sort(taskSort);
   const tray = `<aside class="card tray" data-drop="tray">
     <div class="card-head"><h2>Unscheduled</h2><span class="chip">${unscheduled.length}</span></div>
-    <p class="muted small" style="margin:0 0 10px">Drag a task onto the calendar, or use Schedule. Drop a block here to unschedule it.</p>
+    <p class="muted small" style="margin:0 0 10px">Tasks to fit in: drag one onto the calendar, or use Schedule. Click an empty time on the calendar to add an event instead.</p>
     <div style="margin-bottom:10px">${quickAddHtml('tray', 'New task, press Enter')}</div>
-    ${unscheduled.map((t) => `<div class="tray-item" draggable="true" data-drag="${t.id}" style="border-left-color:${listColor(t.listId)}">
+    ${unscheduled.map((t) => `<div class="tray-item" draggable="true" data-drag="t:${t.id}" style="border-left-color:${listColor(t.listId)}">
       <div class="task-title" data-action="edit-task" data-id="${t.id}">${esc(t.title)}</div>
       <div class="row">${t.due ? `<span class="chip ${t.due < todayStr() ? 'overdue' : ''}">${dueLabel(t.due)}</span>` : ''}${t.priority === 'high' ? '<span class="chip prio-high">High</span>' : ''}
       ${t.est ? `<span class="chip">~${fmtDur(t.est)}</span>` : ''}
@@ -982,7 +1017,8 @@ function viewCalendar() {
   </aside>`;
   const seg = ['day', 'week', 'month'].map((v) => `<button class="${ui.calView === v ? 'on' : ''}" data-action="cal-view" data-view="${v}">${v[0].toUpperCase() + v.slice(1)}</button>`).join('');
   const planFor = ui.calView === 'day' && ui.calDate > todayStr() ? ui.calDate : todayStr();
-  const toolbar = `<button class="btn primary" data-action="plan-day" data-date="${planFor}">${ICONS.bolt} Plan ${planFor === todayStr() ? 'today' : fmtDate(planFor, { weekday: 'short' })}</button>
+  const toolbar = `<button class="btn" data-action="new-event">${ICONS.plus} New event</button>
+    <button class="btn primary" data-action="plan-day" data-date="${planFor}">${ICONS.bolt} Plan ${planFor === todayStr() ? 'today' : fmtDate(planFor, { weekday: 'short' })}</button>
     <button class="btn icon" data-action="cal-step" data-dir="-1" aria-label="Previous">${ICONS.left}</button>
     <button class="btn" data-action="cal-today">Today</button>
     <button class="btn icon" data-action="cal-step" data-dir="1" aria-label="Next">${ICONS.right}</button>
@@ -1213,7 +1249,8 @@ function viewStats() {
   const wk = startOfWeek(new Date());
   const [from, to] = ui.hoursRange === 'week' ? [ymd(wk), ymd(addDays(wk, 6))] : [lastNDays(30)[0], todayStr()];
   const byList = state.lists.map((l) => ({
-    l, min: state.tasks.filter((t) => t.listId === l.id && t.block && t.block.date >= from && t.block.date <= to).reduce((a, t) => a + t.block.dur, 0),
+    l, min: state.tasks.filter((t) => t.listId === l.id && t.block && t.block.date >= from && t.block.date <= to).reduce((a, t) => a + t.block.dur, 0)
+      + state.events.filter((ev) => ev.listId === l.id && ev.date >= from && ev.date <= to).reduce((a, ev) => a + ev.dur, 0),
   })).sort((a, b) => b.min - a.min);
   const maxMin = Math.max(1, ...byList.map((x) => x.min));
   const totalBlocked = byList.reduce((a, x) => a + x.min, 0);
@@ -1413,6 +1450,7 @@ function openTaskModal(id, defaults = {}) {
     <div class="modal-foot">
       ${id ? `<button type="button" class="btn danger" data-action="delete-task" data-id="${id}">Delete</button>` : ''}
       ${id && !t.done && !t.parentId && !hasOpenSessions(t) ? `<button type="button" class="btn" data-action="split-task" data-id="${id}">Split into sessions</button>` : ''}
+      ${id && t.block && !t.done && !t.parentId && !hasSessions(t) ? `<button type="button" class="btn ghost" data-action="task-to-event" data-id="${id}">Make it an event</button>` : ''}
       <span class="spacer"></span>
       <button type="button" class="btn" data-action="close-modal">Cancel</button>
       <button class="btn primary">Save</button>
@@ -1468,6 +1506,28 @@ function openBusyModal(id) {
     <div class="small" id="busy-msg" style="color:var(--danger);margin-top:8px"></div>
     <div class="modal-foot">${id ? `<button type="button" class="btn danger" data-action="delete-busy" data-id="${id}">Delete</button>` : ''}<span class="spacer"></span>
       <button type="button" class="btn" data-action="close-modal">Cancel</button><button class="btn primary">Save</button></div></form>`);
+}
+function openEventModal(id, defaults = {}) {
+  const ev = id ? eventById(id) : { title: '', date: ui.calDate, start: nextSlot(), dur: 60, listId: null, notes: '', ...defaults };
+  if (!ev) return;
+  openModal(`<form data-form="event" data-id="${id || ''}"><h2>${id ? 'Edit event' : 'New event'}</h2>
+    <p class="muted small" style="margin:-8px 0 14px">Events sit on your calendar only. They don't appear in task lists and don't get checked off.</p>
+    <div class="fields">
+      <label class="field full">Title<input class="input" name="title" required value="${esc(ev.title)}" placeholder="Tennis match vs Central, dentist, party…" ${id ? '' : 'data-autosort'}></label>
+      <label class="field">Date<input class="input" type="date" name="date" value="${ev.date}" required></label>
+      <div class="field">Color ${listPickerHtml(ev.listId, { autosort: !id, allowNone: true, label: 'Color', noneLabel: 'Accent color' })}</div>
+      <label class="field">Starts<input class="input" type="time" step="300" name="start" value="${toHHMM(ev.start)}" required></label>
+      <label class="field">Ends<input class="input" type="time" step="300" name="end" value="${toHHMM(Math.min(ev.start + ev.dur, 1439))}" required></label>
+      <label class="field full">Notes<textarea class="input" name="notes" rows="2" placeholder="Location, what to bring…">${esc(ev.notes || '')}</textarea></label>
+    </div>
+    <div class="small" id="event-msg" style="color:var(--danger);margin-top:8px"></div>
+    <div class="modal-foot">
+      ${id ? `<button type="button" class="btn danger" data-action="delete-event" data-id="${id}">Delete</button>` : ''}
+      <button type="button" class="btn ghost" data-action="event-to-task" data-id="${id || ''}">Make it a task instead</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn" data-action="close-modal">Cancel</button>
+      <button class="btn primary">Save</button>
+    </div></form>`);
 }
 function openHabitModal(id) {
   const h = id ? habitById(id) : { name: '', days: [1, 2, 3, 4, 5], goal: 3, reminder: '', listId: null };
@@ -1527,6 +1587,16 @@ const FORMS = {
     taskById(f.dataset.id).block = { date: d.get('date'), start: fromHHMM(d.get('start')), dur: +d.get('dur') };
     commit(`Scheduled for ${fmtDate(d.get('date'))} at ${fmtTime(fromHHMM(d.get('start')))}`);
   },
+  event(f) {
+    const d = new FormData(f);
+    const start = fromHHMM(d.get('start')), end = fromHHMM(d.get('end'));
+    if (end <= start) { $('#event-msg').textContent = 'The end time needs to be after the start time.'; return; }
+    const fields = { title: d.get('title').trim(), date: d.get('date'), start, dur: end - start, listId: d.get('listId') || null, notes: d.get('notes') || '' };
+    if (!fields.title) return;
+    if (f.dataset.id) Object.assign(eventById(f.dataset.id), fields);
+    else state.events.push({ id: uid(), createdAt: Date.now(), ...fields });
+    commit(f.dataset.id ? 'Event saved' : `Event added ${slotLabel(fields)}`);
+  },
   busy(f) {
     const d = new FormData(f);
     const fields = { title: d.get('title').trim(), days: d.getAll('days').map(Number), start: fromHHMM(d.get('start')), end: fromHHMM(d.get('end')) };
@@ -1573,6 +1643,45 @@ function commit(msg) { save(); closeModal(); render(); if (msg) toast(msg); }
    ========================================================= */
 const ACTIONS = {
   'toggle-nav': () => app.classList.toggle('nav-open'),
+  'new-event': () => {
+    const date = ui.calDate >= todayStr() ? ui.calDate : todayStr();
+    const slot = findSlot(60, date, 0, { days: 1 });
+    openEventModal(null, { date, start: slot?.date === date ? slot.start : nextSlot() });
+  },
+  'edit-event': (el) => openEventModal(el.dataset.id),
+  'delete-event': (el) => {
+    const ev = eventById(el.dataset.id);
+    askConfirm(`Delete the event “${ev.title}”?`, 'Delete', () => {
+      state.events = state.events.filter((x) => x !== ev);
+      commit('Event deleted');
+    });
+  },
+  // Converting keeps whatever is typed in the open form.
+  'event-to-task': (el) => {
+    const f = el.closest('form'), d = new FormData(f);
+    const start = fromHHMM(d.get('start') || '09:00'), end = fromHHMM(d.get('end') || '10:00');
+    const draft = { title: (d.get('title') || '').trim(), listId: d.get('listId') || detectList(d.get('title') || '')?.id || state.lists[0].id, notes: d.get('notes') || '',
+      due: d.get('date'), block: { date: d.get('date'), start, dur: Math.max(15, end - start) } };
+    if (el.dataset.id) {
+      const undo = snapshot();
+      state.events = state.events.filter((x) => x.id !== el.dataset.id);
+      state.tasks.push({ id: uid(), priority: 'none', done: false, doneAt: null, subtasks: [], repeat: 'none', est: null, createdAt: Date.now(), ...draft });
+      closeModal(); save(); render();
+      toast(`“${draft.title}” is now a task`, undo);
+    } else {
+      closeModal();
+      openTaskModal(null, draft);
+    }
+  },
+  'task-to-event': (el) => {
+    const t = taskById(el.dataset.id);
+    if (!t?.block) return;
+    const undo = snapshot();
+    state.events.push({ id: uid(), title: t.title, date: t.block.date, start: t.block.start, dur: t.block.dur, listId: t.listId, notes: t.notes || '', createdAt: Date.now() });
+    state.tasks = state.tasks.filter((x) => x !== t);
+    closeModal(); save(); render();
+    toast(`“${t.title}” is now an event`, undo);
+  },
   'habit-template': (el) => {
     const t = HABIT_TEMPLATES.find((x) => x.name === el.dataset.name);
     const undo = snapshot();
@@ -1750,7 +1859,7 @@ const ACTIONS = {
       return;
     }
     const m = clamp(Math.floor(exact / 30) * 30, 0, 23 * 60);
-    openTaskModal(null, { due: el.dataset.day, block: { date: el.dataset.day, start: m, dur: 60 } });
+    openEventModal(null, { date: el.dataset.day, start: m, dur: 60 });
   },
   'next-slot': (el) => autoSchedule(taskById(el.dataset.id)),
   'quick-pick': (el) => {
@@ -2144,15 +2253,16 @@ document.addEventListener('dragstart', (e) => {
   if (order) { drag = { order: order.dataset.order }; order.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', drag.order); return; }
   const el = e.target.closest?.('[data-drag]');
   if (!el) return;
-  const t = taskById(el.dataset.drag);
+  const item = calItem(el.dataset.drag);
+  if (!item) return;
   let offsetMin = 0;
   if (el.classList.contains('block')) {
     const hourPx = el.parentElement.getBoundingClientRect().height / 24;
     offsetMin = ((e.clientY - el.getBoundingClientRect().top) / hourPx) * 60;
   }
-  drag = { id: t.id, dur: taskDur(t), offsetMin };
+  drag = { key: el.dataset.drag, dur: item.kind === 'e' ? item.obj.dur : taskDur(item.obj), offsetMin };
   e.dataTransfer.effectAllowed = 'move';
-  e.dataTransfer.setData('text/plain', t.id);
+  e.dataTransfer.setData('text/plain', drag.key);
 });
 
 document.addEventListener('dragover', (e) => {
@@ -2198,18 +2308,20 @@ document.addEventListener('drop', (e) => {
     drag = null;
     return;
   }
-  const t = taskById(drag.id);
+  const item = calItem(drag.key);
   const col = e.target.closest('.day-col'), cell = e.target.closest('.mcell'), tray = e.target.closest('[data-drop="tray"]');
   if (col) {
     const start = dropMinutes(col, e);
-    t.block = { date: col.dataset.day, start, dur: drag.dur };
-    toast(`Blocked ${fmtDate(col.dataset.day)}, ${fmtTime(start)} – ${fmtTime(start + drag.dur)}`);
+    placeItem(item, col.dataset.day, start, drag.dur);
+    toast(`${item.kind === 'e' ? 'Moved' : 'Blocked'} ${fmtDate(col.dataset.day)}, ${fmtTime(start)} – ${fmtTime(start + drag.dur)}`);
   } else if (cell) {
-    t.block = { date: cell.dataset.day, start: t.block?.start ?? 540, dur: drag.dur };
-    toast(`Blocked ${fmtDate(cell.dataset.day)} at ${fmtTime(t.block.start)}`);
-  } else if (tray && t.block) {
-    t.block = null;
+    placeItem(item, cell.dataset.day, item.block?.start ?? 540, drag.dur);
+    toast(`${item.kind === 'e' ? 'Moved' : 'Blocked'} ${fmtDate(cell.dataset.day)} at ${fmtTime(item.kind === 'e' ? item.obj.start : item.obj.block.start)}`);
+  } else if (tray && item.kind === 't' && item.obj.block) {
+    item.obj.block = null;
     toast('Moved back to unscheduled');
+  } else if (tray) {
+    toast('Events stay on the calendar. Open one to turn it into a task.');
   }
   drag = null;
   clearDropMarks();
@@ -2224,29 +2336,30 @@ document.addEventListener('pointerdown', (e) => {
   const handle = e.target.closest?.('[data-resize]');
   if (!handle || ui.locked) return;
   e.preventDefault();
-  const block = handle.parentElement, t = taskById(handle.dataset.resize);
-  resize = { t, block, top: block.getBoundingClientRect().top, hourPx: block.parentElement.getBoundingClientRect().height / 24, dur: t.block.dur, undo: snapshot() };
+  const block = handle.parentElement, item = calItem(handle.dataset.resize);
+  if (!item?.block) return;
+  resize = { item, b: item.block, block, top: block.getBoundingClientRect().top, hourPx: block.parentElement.getBoundingClientRect().height / 24, dur: item.block.dur, undo: snapshot() };
   handle.setPointerCapture(e.pointerId);
   block.classList.add('resizing');
 });
 document.addEventListener('pointermove', (e) => {
   if (!resize) return;
-  const { t, block, top, hourPx } = resize;
-  resize.dur = clamp(Math.round((((e.clientY - top) / hourPx) * 60) / 15) * 15, 15, 1440 - t.block.start);
+  const { b, block, top, hourPx } = resize;
+  resize.dur = clamp(Math.round((((e.clientY - top) / hourPx) * 60) / 15) * 15, 15, 1440 - b.start);
   block.style.height = `${(resize.dur / 60) * hourPx - 2}px`;
-  const label = block.querySelector('span:not(.resize)');
-  if (label) label.textContent = `${fmtTime(t.block.start)} – ${fmtTime(t.block.start + resize.dur)}`;
+  const label = block.querySelector(':scope > span:not(.resize)');
+  if (label) label.textContent = `${fmtTime(b.start)} – ${fmtTime(b.start + resize.dur)}`;
 });
 function endResize() {
   if (!resize) return;
-  const { t, dur, undo } = resize;
+  const { item, b, dur, undo } = resize;
   resize = null;
   ui.skipClick = true;
   setTimeout(() => { ui.skipClick = false; }, 0); // cleared if the release produced no click
-  if (dur === t.block.dur) { render(); return; }
-  t.block.dur = dur;
+  if (dur === b.dur) { render(); return; }
+  b.dur = dur;
   save(); render();
-  toast(`${t.title}: ${fmtDur(dur)}, ends ${fmtTime(t.block.start + dur)}`, undo);
+  toast(`${item.title}: ${fmtDur(dur)}, ends ${fmtTime(b.start + dur)}`, undo);
 }
 document.addEventListener('pointerup', endResize);
 document.addEventListener('pointercancel', endResize);
