@@ -23,6 +23,7 @@ const ACCENTS = { indigo: '#4f46e5', teal: '#0d8f86', rose: '#d6285a', amber: '#
 const PRIORITY = { none: 'None', low: 'Low', med: 'Medium', high: 'High' };
 const PRIO_RANK = { high: 0, med: 1, low: 2, none: 3 };
 const DURATIONS = [15, 30, 45, 60, 90, 120, 180, 240];
+const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6];
 const REPEAT = { none: 'Does not repeat', daily: 'Every day', weekdays: 'Every weekday (Mon–Fri)', weekly: 'Every week', monthly: 'Every month' };
 const REPEAT_SHORT = { daily: 'Daily', weekdays: 'Weekdays', weekly: 'Weekly', monthly: 'Monthly' };
 const TIMER_MODES = { focus: ['Focus', 25], short: ['Short break', 5], long: ['Long break', 15] };
@@ -157,12 +158,20 @@ function setupCategories(s) {
 
 /* ---------- Persistence ---------- */
 let ui_sorted = 0; // tasks moved by the one-time category setup, reported after boot
+// If saved data exists but can't be read, stop instead of starting empty: an empty state
+// would be saved and synced over the real data on every device.
+let loadFailed = null;
 function load() {
+  let raw = null;
+  try { raw = localStorage.getItem(STORE); } catch (_) { /* storage blocked: start empty */ }
+  if (!raw) return normalize(emptyState());
   try {
-    const raw = localStorage.getItem(STORE);
-    if (raw) return normalize(JSON.parse(raw));
-  } catch (_) { /* start empty */ }
-  return normalize(emptyState());
+    return normalize(JSON.parse(raw));
+  } catch (e) {
+    loadFailed = e;
+    console.error('Daybook could not read its saved data', e);
+    return normalize(emptyState());
+  }
 }
 function normalize(s) {
   const base = emptyState();
@@ -179,12 +188,18 @@ function normalize(s) {
   });
   out.settings.sections = out.settings.sections.filter((x) => SECTIONS[x.id]);
   out.tasks.forEach((t) => { t.subtasks = t.subtasks || []; t.repeat = t.repeat || 'none'; });
-  out.habits.forEach((h) => { h.log = h.log || {}; });
+  out.habits.forEach((h) => {
+    h.log = h.log || {};
+    if (h.days === undefined) h.days = h.goal === 7 ? [...ALL_DAYS] : null; // old "7× a week" becomes every day
+    if (!h.goal) h.goal = h.days ? h.days.length : 3;
+  });
   out.lists.forEach((l) => { l.keywords = l.keywords || []; l.kind = l.kind || 'category'; if (l.color == null) l.color = 1; });
   ui_sorted += setupCategories(out);
+  out.habits.forEach((h) => { if (h.listId === undefined) h.listId = detectList(h.name, out.lists)?.id || null; });
   return out;
 }
 function save() {
+  if (loadFailed) return;
   try { localStorage.setItem(STORE, JSON.stringify(state)); } catch (_) { /* storage blocked; sync may still work */ }
   queuePush();
 }
@@ -225,19 +240,92 @@ function dueLabel(due, done) {
   if (due < T && !done) return `Overdue · ${fmtDate(due)}`;
   return `Due ${fmtDate(due)}`;
 }
-function streak(h) {
-  let d = new Date();
-  if (!h.log[ymd(d)]) d = addDays(d, -1);
-  let n = 0;
-  while (h.log[ymd(d)]) { n++; d = addDays(d, -1); }
-  return n;
-}
-function weekCount(h) {
-  const start = startOfWeek(new Date());
+/* ---------- Habits ----------
+   A habit runs either on specific weekdays (h.days) or a number of times per week (h.goal).
+   Streaks only count days the habit is due, so rest days never break one; for "× per week"
+   habits the streak is weeks in a row with the goal met. */
+const habitMode = (h) => (Array.isArray(h.days) && h.days.length ? 'days' : 'weekly');
+const scheduledOn = (h, ds) => habitMode(h) === 'weekly' || h.days.includes(parse(ds).getDay());
+const weekTarget = (h) => (habitMode(h) === 'days' ? h.days.length : h.goal);
+function weekCount(h, day = new Date()) {
+  const start = startOfWeek(day);
   let n = 0;
   for (let i = 0; i < 7; i++) if (h.log[ymd(addDays(start, i))]) n++;
   return n;
 }
+// Due today: scheduled for today, or a "× per week" habit still short of its goal (or already ticked today).
+function dueToday(h) {
+  const T = todayStr();
+  if (h.log[T]) return true;
+  return habitMode(h) === 'days' ? scheduledOn(h, T) : weekCount(h) < h.goal;
+}
+function streakInfo(h) {
+  const T = todayStr(), logged = Object.keys(h.log).filter((d) => h.log[d]).sort();
+  if (!logged.length) return { current: 0, best: 0, unit: habitMode(h) === 'days' ? 'day' : 'week' };
+  let run = 0, best = 0;
+  if (habitMode(h) === 'days') {
+    for (let d = parse(logged[0]); ymd(d) <= T; d = addDays(d, 1)) {
+      const ds = ymd(d);
+      if (!scheduledOn(h, ds)) continue;
+      if (h.log[ds]) best = Math.max(best, ++run);
+      else if (ds !== T) run = 0; // today isn't missed until it's over
+    }
+    return { current: run, best, unit: 'day' };
+  }
+  const thisWeek = ymd(startOfWeek(new Date()));
+  for (let w = startOfWeek(parse(logged[0])); ymd(w) <= thisWeek; w = addDays(w, 7)) {
+    if (weekCount(h, w) >= h.goal) best = Math.max(best, ++run);
+    else if (ymd(w) !== thisWeek) run = 0;
+  }
+  return { current: run, best, unit: 'week' };
+}
+function streakLabel(h, info = streakInfo(h)) {
+  const n = info.current;
+  if (!n) return 'No streak yet';
+  if (info.unit === 'week') return `${n}-week streak`;
+  return h.days.length === 7 ? `${n}-day streak` : `${n} in a row`;
+}
+function scheduleLabel(h) {
+  if (habitMode(h) === 'weekly') return `${h.goal}× a week`;
+  const key = [...h.days].sort().join('');
+  if (key === '0123456') return 'Every day';
+  if (key === '12345') return 'Weekdays';
+  if (key === '06') return 'Weekends';
+  return [1, 2, 3, 4, 5, 6, 0].filter((d) => h.days.includes(d)).map((d) => WEEKDAYS[d]).join(', ');
+}
+const habitColor = (h) => (h.listId && listById(h.listId) ? `var(--c${listById(h.listId).color})` : 'var(--accent)');
+function timeOfDay(h) {
+  if (!h.reminder) return 'Anytime';
+  const m = fromHHMM(h.reminder);
+  return m < 720 ? 'Morning' : m < 1020 ? 'Afternoon' : 'Evening';
+}
+// Share of due check-ins done over the last n days (for "× per week", against the prorated goal).
+function consistency(h, n) {
+  const days = lastNDays(n);
+  const done = days.filter((ds) => h.log[ds]).length;
+  if (habitMode(h) === 'weekly') return Math.min(1, done / Math.max(1, (h.goal * n) / 7));
+  const due = days.filter((ds) => scheduledOn(h, ds) && (ds !== todayStr() || h.log[ds])).length;
+  return due ? Math.min(1, days.filter((ds) => h.log[ds] && scheduledOn(h, ds)).length / due) : 0;
+}
+const HABIT_TEMPLATES = [
+  { name: 'Lift', days: [1, 3, 5], reminder: '18:00', list: 'Lift' },
+  { name: 'Tennis practice', days: [2, 4], reminder: '16:00', list: 'Tennis' },
+  { name: 'Golf range', days: [6], reminder: '10:00', list: 'Golf' },
+  { name: 'Latin vocab review', days: [1, 2, 3, 4, 5], reminder: '20:00', list: 'Latin' },
+  { name: 'APUSH flashcards', goal: 3, reminder: '', list: 'APUSH' },
+  { name: 'Read 20 minutes', days: ALL_DAYS, reminder: '21:30', list: 'Routine' },
+  { name: 'Stretch', days: ALL_DAYS, reminder: '07:00', list: 'Routine' },
+  { name: 'Make bed', days: ALL_DAYS, reminder: '07:00', list: 'Routine' },
+  { name: 'Drink water', days: ALL_DAYS, reminder: '12:00', list: 'Routine' },
+  { name: 'No phone after 10', days: ALL_DAYS, reminder: '22:00', list: 'Routine' },
+  { name: 'Sleep by 11', days: ALL_DAYS, reminder: '22:30', list: 'Routine' },
+];
+const unusedTemplates = () => HABIT_TEMPLATES.filter((t) => !state.habits.some((h) => h.name.toLowerCase() === t.name.toLowerCase()));
+function habitFromTemplate(t) {
+  const list = state.lists.find((l) => l.name.toLowerCase() === t.list.toLowerCase());
+  return { id: uid(), name: t.name, days: t.days ? [...t.days] : null, goal: t.days ? t.days.length : t.goal, reminder: t.reminder, listId: list?.id || null, log: {} };
+}
+const templateHint = (t) => `${t.days ? scheduleLabel({ days: t.days }) : `${t.goal}× a week`}${t.reminder ? ` · ${fmtTime(fromHHMM(t.reminder))}` : ''}`;
 
 /* ---------- Repeating tasks ---------- */
 const daysBetween = (a, b) => Math.round((parse(b) - parse(a)) / 86400000);
@@ -604,7 +692,7 @@ function render() {
 function taskRow(t) {
   const list = listById(t.listId);
   const meta = [];
-  if (list) meta.push(`<span class="chip"><span class="dot" style="background:${listColor(t.listId)}"></span>${esc(list.name)}</span>`);
+  if (list) meta.push(`<button type="button" class="chip chip-btn" data-action="row-list" data-id="${t.id}" aria-label="List: ${esc(list.name)}. Change list and color" data-tip="Change list &amp; color"><span class="dot" style="background:${listColor(t.listId)}"></span>${esc(list.name)}</button>`);
   if (t.priority !== 'none') meta.push(`<span class="chip ${t.priority === 'high' ? 'prio-high' : ''}">${PRIORITY[t.priority]} priority</span>`);
   if (t.due) meta.push(`<span class="chip ${!t.done && t.due < todayStr() ? 'overdue' : ''}">${dueLabel(t.due, t.done)}</span>`);
   if (t.block) meta.push(`<span class="chip">${ICONS.clock}${fmtDate(t.block.date)} · ${fmtTime(t.block.start)}</span>`);
@@ -628,6 +716,51 @@ function taskRow(t) {
     </div>
   </div>`;
 }
+// A color-coded list picker: a button showing the current list's color and name, opening a menu
+// of every list with its color. `onpick` "form" writes a hidden input; "note" relinks the open note.
+function listPickerOptions(selId, { allowNone = false, noneLabel = 'No linked list' } = {}) {
+  const opt = (l) => `<button type="button" class="lp-opt" role="option" data-action="lp-pick" data-id="${l.id}" aria-selected="${l.id === selId}">
+    <span class="dot" style="background:var(--c${l.color})"></span><span>${esc(l.name)}</span>${l.id === selId ? `<span class="lp-check">${ICONS.check}</span>` : ''}</button>`;
+  const school = state.lists.filter(isSchool), other = state.lists.filter((l) => !isSchool(l));
+  return `${allowNone ? `<button type="button" class="lp-opt" role="option" data-action="lp-pick" data-id="" aria-selected="${!selId}"><span class="dot" style="background:transparent;box-shadow:inset 0 0 0 1.5px var(--border)"></span><span>${esc(noneLabel)}</span></button>` : ''}
+    ${school.length ? `<div class="lp-group">School</div>${school.map(opt).join('')}` : ''}
+    <div class="lp-group">Other</div>${other.map(opt).join('')}
+    <button type="button" class="lp-opt lp-edit" data-action="lp-edit-colors">${ICONS.edit}<span>Edit lists &amp; colors</span></button>`;
+}
+function listPickerHtml(selId, { name = 'listId', onpick = 'form', autosort = false, allowNone = false, label = 'List', noneLabel = 'No linked list' } = {}) {
+  const l = listById(selId);
+  return `<div class="lp" data-lp data-onpick="${onpick}" data-allow-none="${allowNone ? 1 : ''}" data-none-label="${esc(noneLabel)}">
+    ${onpick === 'form' ? `<input type="hidden" name="${name}" value="${selId || ''}" ${autosort ? 'data-autosort-target' : ''}>` : ''}
+    <button type="button" class="input lp-btn" data-action="lp-open" aria-haspopup="listbox" aria-expanded="false" aria-label="${label}: ${l ? esc(l.name) : 'none'}">
+      <span class="dot" style="background:${l ? `var(--c${l.color})` : 'transparent'}"></span><span class="lp-name">${l ? esc(l.name) : esc(noneLabel)}</span>${ICONS.down}</button>
+    <div class="lp-menu hidden" role="listbox" aria-label="${label}">${listPickerOptions(selId, { allowNone, noneLabel })}</div>
+  </div>`;
+}
+function setPicker(lp, id) {
+  const l = listById(id);
+  const hidden = lp.querySelector('input[type=hidden]');
+  if (hidden) hidden.value = id;
+  const btn = lp.querySelector('.lp-btn');
+  btn.querySelector('.dot').style.background = l ? `var(--c${l.color})` : 'transparent';
+  btn.querySelector('.lp-name').textContent = l ? l.name : lp.dataset.noneLabel;
+  btn.setAttribute('aria-label', `List: ${l ? l.name : 'none'}`);
+  lp.querySelector('.lp-menu').innerHTML = listPickerOptions(id, { allowNone: !!lp.dataset.allowNone, noneLabel: lp.dataset.noneLabel });
+}
+function closePickers(except) {
+  $$('.lp-menu:not(.hidden)').forEach((m) => {
+    if (m.parentElement === except) return;
+    m.classList.add('hidden');
+    m.parentElement.querySelector('.lp-btn').setAttribute('aria-expanded', 'false');
+  });
+}
+// Changing a task's list (and so its color) straight from its chip.
+function openListModal(taskId) {
+  const t = taskById(taskId);
+  openModal(`<h2>List &amp; color for “${esc(t.title)}”</h2>
+    <div class="lp-grid" role="listbox" aria-label="List">${listPickerOptions(t.listId).replace(/data-action="lp-pick"/g, `data-action="task-list" data-task="${taskId}"`)}</div>
+    <div class="modal-foot"><span class="spacer"></span><button class="btn" data-action="close-modal">Cancel</button></div>`);
+}
+
 // School lists are grouped together in every picker.
 const listOptions = (sel, extra = '') => {
   const opt = (l) => `<option value="${l.id}" ${l.id === sel ? 'selected' : ''}>${esc(l.name)}</option>`;
@@ -697,13 +830,25 @@ const TODAY_SECTIONS = {
   },
   habits() {
     const T = todayStr();
-    const rows = state.habits.map((h) => `<div class="habit-pill">
-      <input type="checkbox" class="check" data-action="habit-toggle" data-id="${h.id}" data-date="${T}" ${h.log[T] ? 'checked' : ''} aria-label="${esc(h.name)}">
-      <span class="spacer">${esc(h.name)}</span>
-      ${h.reminder ? `<span class="chip">${ICONS.bell}${fmtTime(fromHHMM(h.reminder))}</span>` : ''}
-      <span class="chip">${streak(h)}-day streak</span></div>`).join('');
-    const done = state.habits.filter((h) => h.log[T]).length;
-    return `<section class="card"><div class="card-head"><h2>Habits</h2><span class="chip">${done}/${state.habits.length} today</span></div>${rows || '<div class="empty">No habits yet.</div>'}</section>`;
+    if (!state.habits.length) {
+      return `<section class="card"><div class="card-head"><h2>Habits</h2></div>
+        <div class="empty">No habits yet. <button class="btn sm" data-action="go" data-to="habits">${ICONS.plus} Add one</button></div></section>`;
+    }
+    const due = state.habits.filter(dueToday).sort((a, b) => (a.reminder || '99') < (b.reminder || '99') ? -1 : 1);
+    const resting = state.habits.filter((h) => !dueToday(h));
+    const groups = ['Morning', 'Afternoon', 'Evening', 'Anytime'].map((g) => [g, due.filter((h) => timeOfDay(h) === g)]).filter(([, hs]) => hs.length);
+    const row = (h) => {
+      const done = !!h.log[T];
+      return `<button class="habit-row ${done ? 'done' : ''}" style="--lc:${habitColor(h)}" data-action="habit-toggle" data-id="${h.id}" data-date="${T}" aria-pressed="${done}">
+        <span class="habit-check">${done ? ICONS.check : ''}</span>
+        <span class="habit-name">${esc(h.name)}</span>
+        <span class="habit-meta">${h.reminder ? `${fmtTime(fromHHMM(h.reminder))} · ` : ''}${streakLabel(h)}</span></button>`;
+    };
+    const doneCount = due.filter((h) => h.log[T]).length;
+    return `<section class="card"><div class="card-head"><h2>Habits</h2><span class="chip">${doneCount}/${due.length} today</span></div>
+      ${groups.map(([g, hs]) => `<div class="habit-group">${g}</div><div class="stack" style="gap:6px">${hs.map(row).join('')}</div>`).join('') || '<div class="empty">Nothing due today. Enjoy the rest day.</div>'}
+      ${resting.length ? `<div class="muted small" style="margin-top:10px">Not today: ${resting.map((h) => esc(h.name) + (habitMode(h) === 'weekly' ? ' (done for the week)' : '')).join(', ')}</div>` : ''}
+    </section>`;
   },
   goals() {
     return `<section class="card"><div class="card-head"><h2>Goals</h2><button class="btn sm ghost" data-action="go" data-to="habits">Manage</button></div>
@@ -928,7 +1073,7 @@ function noteEditorHtml() {
   const list = listById(n.listId);
   const openCount = list ? state.tasks.filter((t) => t.listId === list.id && !t.done).length : 0;
   return `<div class="row wrap">
-      <select class="input" style="width:auto" data-note-field="listId" aria-label="Linked list">${listOptions(n.listId, '<option value="">No linked list</option>')}</select>
+      <div style="min-width:180px">${listPickerHtml(n.listId, { onpick: 'note', allowNone: true, label: 'Linked list' })}</div>
       ${list ? `<button class="btn sm ghost" data-action="note-list-tasks" data-list="${list.id}">${openCount} open task${openCount === 1 ? '' : 's'} in ${esc(list.name)} →</button>` : ''}
       <span class="spacer"></span>
       <span class="muted small">Edited ${new Date(n.updatedAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
@@ -958,12 +1103,16 @@ function viewHabits() {
   const days = lastNDays(7), T = todayStr();
   const head = days.map((ds) => `<th class="${ds === T ? 'is-today' : ''}">${parse(ds).toLocaleDateString(undefined, { weekday: 'narrow' })}<br>${parse(ds).getDate()}</th>`).join('');
   const rows = state.habits.map((h) => {
-    const wc = weekCount(h);
-    return `<tr>
-      <td><b>${esc(h.name)}</b><div class="muted small">${h.goal}× per week${h.reminder ? ` · reminder ${fmtTime(fromHHMM(h.reminder))}` : ''}</div></td>
-      ${days.map((ds) => `<td><button class="tick ${h.log[ds] ? 'on' : ''}" data-action="habit-toggle" data-id="${h.id}" data-date="${ds}" aria-label="${esc(h.name)}, ${fmtDate(ds)}" aria-pressed="${!!h.log[ds]}">${h.log[ds] ? ICONS.check : ''}</button></td>`).join('')}
-      <td class="streak">${streak(h)}d</td>
-      <td style="min-width:90px"><span class="small">${wc}/${h.goal}</span><div class="bar"><span style="width:${clamp((wc / h.goal) * 100, 0, 100)}%"></span></div></td>
+    const wc = weekCount(h), target = weekTarget(h), info = streakInfo(h);
+    return `<tr style="--lc:${habitColor(h)}">
+      <td><div class="row" style="gap:8px;align-items:flex-start"><span class="dot" style="background:var(--lc);margin-top:5px"></span><div><b>${esc(h.name)}</b>
+        <div class="muted small">${scheduleLabel(h)}${h.reminder ? ` · ${fmtTime(fromHHMM(h.reminder))}` : ''}</div></div></div></td>
+      ${days.map((ds) => {
+        const rest = !scheduledOn(h, ds);
+        return `<td><button class="tick ${h.log[ds] ? 'on' : ''} ${rest ? 'rest' : ''}" data-action="habit-toggle" data-id="${h.id}" data-date="${ds}" aria-label="${esc(h.name)}, ${fmtDate(ds)}${rest ? ', rest day' : ''}" aria-pressed="${!!h.log[ds]}" ${rest ? 'data-tip="Rest day. A tick here is a bonus."' : ''}>${h.log[ds] ? ICONS.check : ''}</button></td>`;
+      }).join('')}
+      <td class="streak">${info.current}<span class="muted small">${info.unit === 'week' ? ' wk' : ''}</span><div class="muted small" style="font-weight:400">best ${info.best}</div></td>
+      <td style="min-width:90px"><span class="small">${wc}/${target}</span><div class="bar"><span style="width:${clamp((wc / target) * 100, 0, 100)}%;background:var(--lc)"></span></div></td>
       <td style="white-space:nowrap"><button class="btn icon ghost sm" data-action="edit-habit" data-id="${h.id}" aria-label="Edit">${ICONS.edit}</button><button class="btn icon ghost sm" data-action="delete-habit" data-id="${h.id}" aria-label="Delete">${ICONS.trash}</button></td>
     </tr>`;
   }).join('');
@@ -974,14 +1123,22 @@ function viewHabits() {
   const doneThisWeek = state.tasks.filter((t) => t.done && t.doneAt >= wkStart).length;
   const blockedMin = state.tasks.filter((t) => t.block && t.block.date >= wk && t.block.date <= ymd(addDays(parse(wk), 6))).reduce((a, t) => a + t.block.dur, 0);
   const elapsed = Math.round((new Date() - wkStart) / 86400000) + 1;
-  const possible = state.habits.length * Math.min(elapsed, 7);
-  const hits = state.habits.reduce((a, h) => a + weekCount(h), 0);
+  // This week's due check-ins so far: scheduled days up to today, or the weekly goal.
+  const possible = state.habits.reduce((a, h) => a + (habitMode(h) === 'weekly' ? h.goal
+    : Array.from({ length: Math.min(elapsed, 7) }, (_, i) => ymd(addDays(startOfWeek(new Date()), i))).filter((ds) => scheduledOn(h, ds)).length), 0);
+  const hits = state.habits.reduce((a, h) => a + Math.min(weekCount(h), weekTarget(h)), 0);
   const past = Object.keys(state.reviews).filter((k) => k !== wk).sort().reverse();
   const notify = 'Notification' in window && Notification.permission !== 'granted'
     ? `<button class="btn" data-action="enable-notify">${ICONS.bell} Enable reminder notifications</button>` : '';
 
   return pageHead('Habits', 'Small things, done often.', `${notify}<button class="btn primary" data-action="new-habit">${ICONS.plus} New habit</button>`) +
     `<div class="stack">
+      ${unusedTemplates().length ? `<section class="card"><div class="card-head"><h2>Quick add</h2><span class="muted small">One tap adds it with these days, time and color. Edit it any time.</span></div>
+        <div class="templates">${unusedTemplates().map((t) => {
+          const list = state.lists.find((l) => l.name.toLowerCase() === t.list.toLowerCase());
+          return `<button class="template" data-action="habit-template" data-name="${esc(t.name)}" style="--lc:${list ? `var(--c${list.color})` : 'var(--accent)'}">
+            <span class="dot" style="background:var(--lc)"></span><span><b>${esc(t.name)}</b><small>${templateHint(t)}</small></span>${ICONS.plus}</button>`;
+        }).join('')}</div></section>` : ''}
       <section class="card"><div class="table-scroll"><table class="htable">
         <thead><tr><th>Habit</th>${head}<th>Streak</th><th>This week</th><th></th></tr></thead>
         <tbody>${rows || `<tr><td colspan="11" class="empty">No habits yet. Add one to start a streak.</td></tr>`}</tbody>
@@ -1063,10 +1220,7 @@ function viewStats() {
   const weekBlocked = state.tasks.filter((t) => t.block && t.block.date >= ymd(wk) && t.block.date <= ymd(addDays(wk, 6))).reduce((a, t) => a + t.block.dur, 0);
 
   const days30 = lastNDays(30);
-  const habitRows = state.habits.map((h) => {
-    const hits = days30.filter((ds) => h.log[ds]).length;
-    return { h, hits, pct: Math.round((hits / 30) * 100) };
-  });
+  const habitRows = state.habits.map((h) => ({ h, pct: Math.round(consistency(h, 30) * 100) }));
   const overall = habitRows.length ? Math.round(habitRows.reduce((a, r) => a + r.pct, 0) / habitRows.length) : 0;
 
   const since = parse(days14[0]).getTime();
@@ -1089,7 +1243,7 @@ function viewStats() {
         <section class="card"><div class="card-head"><h2>Habit consistency · 30 days</h2>
           <span class="row small muted"><span class="heat-cell on" style="width:10px"></span>Done <span class="heat-cell" style="width:10px"></span>Missed</span></div>
           <div class="heat">${habitRows.map(({ h, pct }) => `<div class="heat-row"><span class="name" title="${esc(h.name)}">${esc(h.name)}</span>
-            ${days30.map((ds) => `<span class="heat-cell ${h.log[ds] ? 'on' : ''}" data-tip="${esc(h.name)} · ${fmtDate(ds)} · ${h.log[ds] ? 'done' : 'missed'}"></span>`).join('')}
+            ${days30.map((ds) => { const rest = !scheduledOn(h, ds); return `<span class="heat-cell ${h.log[ds] ? 'on' : ''} ${rest && !h.log[ds] ? 'rest' : ''}" data-tip="${esc(h.name)} · ${fmtDate(ds)} · ${h.log[ds] ? 'done' : rest ? 'rest day' : 'missed'}"></span>`; }).join('')}
             <span class="pct">${pct}%</span></div>`).join('') || '<div class="empty">No habits yet.</div>'}</div>
           <div class="muted small" style="margin-top:8px">${fmtDate(days30[0])} → today</div>
         </section>
@@ -1235,7 +1389,7 @@ function openTaskModal(id, defaults = {}) {
   openModal(`<form data-form="task" data-id="${id || ''}"><h2>${id ? 'Edit task' : 'New task'}</h2>
     <div class="fields">
       <label class="field full">Title<input class="input" name="title" required value="${esc(t.title)}" ${id ? '' : 'data-autosort'}></label>
-      <label class="field">List<select class="input" name="listId" ${id ? '' : 'data-autosort-target'}>${listOptions(t.listId)}</select></label>
+      <div class="field">List ${listPickerHtml(t.listId, { autosort: !id })}</div>
       <label class="field">Priority<select class="input" name="priority">${Object.entries(PRIORITY).map(([v, l]) => `<option value="${v}" ${t.priority === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label class="field">Due date<input class="input" type="date" name="due" value="${t.due || ''}"></label>
       <label class="field">Time estimate<select class="input" name="est"><option value="">Not set</option>${[...new Set([...DURATIONS, 300, 360, 480, ...(t.est ? [t.est] : [])])].sort((a, b) => a - b).map((d) => `<option value="${d}" ${t.est === d ? 'selected' : ''}>${fmtDur(d)}</option>`).join('')}</select>
@@ -1316,13 +1470,27 @@ function openBusyModal(id) {
       <button type="button" class="btn" data-action="close-modal">Cancel</button><button class="btn primary">Save</button></div></form>`);
 }
 function openHabitModal(id) {
-  const h = id ? habitById(id) : { name: '', goal: 5, reminder: '' };
+  const h = id ? habitById(id) : { name: '', days: [1, 2, 3, 4, 5], goal: 3, reminder: '', listId: null };
+  const mode = habitMode(h);
   openModal(`<form data-form="habit" data-id="${id || ''}"><h2>${id ? 'Edit habit' : 'New habit'}</h2>
+    ${id || !unusedTemplates().length ? '' : `<div class="muted small" style="margin:-6px 0 6px">Start from one:</div><div class="row wrap" style="gap:6px;margin-bottom:14px">${unusedTemplates().slice(0, 8).map((t) => `<button type="button" class="chip chip-btn" data-action="habit-fill" data-name="${esc(t.name)}">${esc(t.name)}</button>`).join('')}</div>`}
     <div class="fields">
-      <label class="field full">Name<input class="input" name="name" required value="${esc(h.name)}"></label>
-      <label class="field">Weekly goal<select class="input" name="goal">${[1, 2, 3, 4, 5, 6, 7].map((n) => `<option value="${n}" ${h.goal === n ? 'selected' : ''}>${n}× per week</option>`).join('')}</select></label>
+      <label class="field full">Name<input class="input" name="name" required value="${esc(h.name)}" ${id ? '' : 'data-autosort'}></label>
+      <div class="field">Color ${listPickerHtml(h.listId, { autosort: !id, allowNone: true, label: 'Color', noneLabel: 'Accent color' })}</div>
       <label class="field">Reminder (optional)<input class="input" type="time" name="reminder" value="${h.reminder || ''}"></label>
+      <div class="field full">Repeats
+        <div class="seg" role="radiogroup" aria-label="Repeats">
+          <label><input type="radio" name="mode" value="days" ${mode === 'days' ? 'checked' : ''} data-habit-mode> On specific days</label>
+          <label><input type="radio" name="mode" value="weekly" ${mode === 'weekly' ? 'checked' : ''} data-habit-mode> Times per week</label>
+        </div></div>
+      <div class="field full ${mode === 'days' ? '' : 'hidden'}" data-mode-panel="days">Days
+        <div class="day-picks">${[1, 2, 3, 4, 5, 6, 0].map((d) => `<label class="day-pick"><input type="checkbox" name="days" value="${d}" ${mode === 'days' && h.days.includes(d) ? 'checked' : ''}><span>${WEEKDAYS[d]}</span></label>`).join('')}</div>
+        <span class="hint">Your streak only counts these days, so rest days never break it.</span></div>
+      <label class="field full ${mode === 'weekly' ? '' : 'hidden'}" data-mode-panel="weekly">Goal
+        <select class="input" name="goal">${[1, 2, 3, 4, 5, 6].map((n) => `<option value="${n}" ${h.goal === n ? 'selected' : ''}>${n}× a week, any days</option>`).join('')}</select>
+        <span class="hint">Your streak counts weeks in a row you hit the goal.</span></label>
     </div>
+    <div class="small" id="habit-msg" style="color:var(--danger);margin-top:8px"></div>
     <div class="modal-foot"><span class="spacer"></span><button type="button" class="btn" data-action="close-modal">Cancel</button><button class="btn primary">Save</button></div></form>`);
 }
 function openGoalModal(id) {
@@ -1370,7 +1538,9 @@ const FORMS = {
   },
   habit(f) {
     const d = new FormData(f);
-    const fields = { name: d.get('name').trim(), goal: +d.get('goal'), reminder: d.get('reminder') || '' };
+    const days = d.get('mode') === 'days' ? d.getAll('days').map(Number) : null;
+    if (days && !days.length) { $('#habit-msg').textContent = 'Pick at least one day, or switch to times per week.'; return; }
+    const fields = { name: d.get('name').trim(), days, goal: days ? days.length : +d.get('goal'), reminder: d.get('reminder') || '', listId: d.get('listId') || null };
     if (f.dataset.id) Object.assign(habitById(f.dataset.id), fields);
     else state.habits.push({ id: uid(), log: {}, ...fields });
     commit('Habit saved');
@@ -1403,6 +1573,59 @@ function commit(msg) { save(); closeModal(); render(); if (msg) toast(msg); }
    ========================================================= */
 const ACTIONS = {
   'toggle-nav': () => app.classList.toggle('nav-open'),
+  'habit-template': (el) => {
+    const t = HABIT_TEMPLATES.find((x) => x.name === el.dataset.name);
+    const undo = snapshot();
+    state.habits.push(habitFromTemplate(t));
+    save(); render();
+    toast(`Added ${t.name}. Edit it to change days or time.`, undo);
+  },
+  'habit-fill': (el) => {
+    const t = HABIT_TEMPLATES.find((x) => x.name === el.dataset.name), f = el.closest('form');
+    f.name.value = t.name;
+    f.reminder.value = t.reminder;
+    const mode = t.days ? 'days' : 'weekly';
+    f.querySelector(`[name=mode][value=${mode}]`).checked = true;
+    $$('[data-mode-panel]', f).forEach((p) => p.classList.toggle('hidden', p.dataset.modePanel !== mode));
+    $$('[name=days]', f).forEach((c) => { c.checked = !!t.days && t.days.includes(+c.value); });
+    if (!t.days) f.goal.value = t.goal;
+    const list = state.lists.find((l) => l.name.toLowerCase() === t.list.toLowerCase());
+    const lp = $('[data-lp]', f);
+    setPicker(lp, list?.id || '');
+    lp.querySelector('input[type=hidden]').dataset.touched = '1';
+  },
+  'lp-open': (el) => {
+    const lp = el.closest('[data-lp]'), menu = lp.querySelector('.lp-menu');
+    const opening = menu.classList.contains('hidden');
+    closePickers();
+    menu.classList.toggle('hidden', !opening);
+    el.setAttribute('aria-expanded', String(opening));
+    if (opening) (menu.querySelector('[aria-selected="true"]') || menu.querySelector('.lp-opt'))?.focus();
+  },
+  'lp-pick': (el) => {
+    const lp = el.closest('[data-lp]'), id = el.dataset.id;
+    closePickers();
+    if (lp.dataset.onpick === 'note') {
+      const n = state.notes.find((x) => x.id === ui.activeNote);
+      n.listId = id; n.updatedAt = Date.now();
+      save(); render();
+      return;
+    }
+    setPicker(lp, id);
+    const hidden = lp.querySelector('input[type=hidden]');
+    if (hidden) hidden.dataset.touched = '1'; // stop auto-sorting once a list is chosen by hand
+    lp.querySelector('.lp-btn').focus();
+  },
+  'lp-edit-colors': () => { closeModal(); location.hash = 'settings'; setTimeout(() => $('.list-edit')?.scrollIntoView({ block: 'center' }), 50); },
+  'row-list': (el) => openListModal(el.dataset.id),
+  'task-list': (el) => {
+    const t = taskById(el.dataset.task), l = listById(el.dataset.id);
+    if (!t || !l || t.listId === l.id) { closeModal(); return; }
+    const undo = snapshot();
+    t.listId = l.id;
+    closeModal(); save(); render();
+    toast(`Moved to ${l.name}`, undo);
+  },
   'plan-day': (el) => openPlanModal(el.dataset.date || todayStr()),
   'plan-date': (el) => { ui.planDate = el.dataset.date; ui.planExclude = new Set(); refreshPlan(); },
   'plan-apply': () => {
@@ -1782,6 +2005,7 @@ document.addEventListener('click', (e) => {
     if (k) pressKey(k.dataset.key);
     return;
   }
+  if (!e.target.closest('[data-lp]')) closePickers();
   if (ui.skipClick) { ui.skipClick = false; return; } // the click that ends a resize shouldn't open the task
   if (ui.placing) {
     const col = e.target.closest('.day-col');
@@ -1802,9 +2026,9 @@ document.addEventListener('input', (e) => {
   else if (t.hasAttribute('data-autosort')) {
     const target = t.form.querySelector('[data-autosort-target]');
     const hit = detectList(t.value);
-    if (target && !target.dataset.touched) target.value = hit ? hit.id : state.lists[0].id;
+    const lp = target?.closest('[data-lp]');
+    if (target && !target.dataset.touched) setPicker(lp, hit ? hit.id : lp.dataset.allowNone ? '' : state.lists[0].id);
   }
-  else if (t.hasAttribute('data-autosort-target')) t.dataset.touched = '1';
   else if (t.dataset.quickadd) {
     const box = t.parentElement.querySelector('[data-qa-preview]');
     box.innerHTML = t.value.trim() ? quickPreview(parseQuick(t.value)) || '<span class="muted small">No date or time found</span>' : `<span class="muted small">${esc(quickHint())}</span>`;
@@ -1835,6 +2059,8 @@ document.addEventListener('change', (e) => {
     state.settings[t.dataset.setting] = t.value;
     if (state.settings.dayEnd <= state.settings.dayStart) { toast('The day has to end after it starts'); state.settings.dayEnd = '22:00'; render(); }
     save();
+  } else if (t.hasAttribute('data-habit-mode')) {
+    $$('[data-mode-panel]', t.form).forEach((p) => p.classList.toggle('hidden', p.dataset.modePanel !== t.value));
   } else if (t.dataset.planToggle) {
     if (t.checked) ui.planExclude.delete(t.dataset.planToggle); else ui.planExclude.add(t.dataset.planToggle);
     refreshPlan();
@@ -1875,6 +2101,18 @@ document.addEventListener('keydown', (e) => {
   if (ui.locked) {
     if (/^\d$/.test(e.key)) pressKey(e.key);
     else if (e.key === 'Backspace') pressKey('del');
+    return;
+  }
+  if (e.key === 'Escape' && $('.lp-menu:not(.hidden)')) {
+    const open = $('.lp-menu:not(.hidden)');
+    closePickers();
+    open.parentElement.querySelector('.lp-btn').focus();
+    return;
+  }
+  if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && e.target.closest('.lp-menu, .lp-grid')) {
+    e.preventDefault();
+    const opts = [...e.target.closest('.lp-menu, .lp-grid').querySelectorAll('.lp-opt')];
+    opts[clamp(opts.indexOf(e.target) + (e.key === 'ArrowDown' ? 1 : -1), 0, opts.length - 1)]?.focus();
     return;
   }
   if (e.key === 'Escape') { closeModal(); app.classList.remove('nav-open'); }
@@ -2033,7 +2271,7 @@ document.addEventListener('mousemove', (e) => {
 function checkReminders() {
   const T = todayStr(), hhmm = toHHMM(nowMinutes());
   state.habits.forEach((h) => {
-    if (h.reminder !== hhmm || h.log[T] || ui.reminded[h.id] === T) return;
+    if (h.reminder !== hhmm || h.log[T] || !dueToday(h) || ui.reminded[h.id] === T) return;
     ui.reminded[h.id] = T;
     const body = `Time for: ${h.name}`;
     if ('Notification' in window && Notification.permission === 'granted') new Notification('Daybook reminder', { body });
@@ -2146,6 +2384,7 @@ function queuePush() {
   sync.timer = setTimeout(pushNow, 600);
 }
 async function pushNow() {
+  if (loadFailed) return;
   clearTimeout(sync.timer);
   sync.timer = 0;
   if (!sync.write) return;
@@ -2461,6 +2700,13 @@ FORMS['cloud-connect'] = async (f) => {
 };
 
 /* ---------- Boot ---------- */
+if (loadFailed) {
+  document.body.innerHTML = `<div style="max-width:520px;margin:15vh auto;padding:0 16px;font:15px/1.5 system-ui,sans-serif">
+    <h1 style="font-size:22px">Daybook couldn't open your data</h1>
+    <p>Your data is safe. Nothing was changed or synced. This is a bug in this version of Daybook. Please report it, then try again after it's fixed.</p>
+    <p style="color:#888;font-size:13px">${esc(String(loadFailed.message || loadFailed))}</p></div>`;
+  throw loadFailed;
+}
 if (ui_sorted) { save(); setTimeout(() => toast(`Color categories added. Sorted ${ui_sorted} task${ui_sorted === 1 ? '' : 's'} out of your Inbox.`), 400); }
 render();
 renderLock();
