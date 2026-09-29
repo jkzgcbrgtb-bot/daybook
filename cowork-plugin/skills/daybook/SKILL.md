@@ -25,6 +25,13 @@ If a command fails with "Not connected to Daybook yet":
 
 Never print, repeat, or summarize the sync code back to the user or into any file other than the code file. If no folder is available to save into, pass the code for the session with the environment variable `DAYBOOK_SYNC_CODE` instead.
 
+## Tasks vs. events
+
+- **Task:** something to do, which gets checked off (homework, "email coach", "clean room"). Tasks live in lists and can also be time-blocked on the calendar.
+- **Event:** something that happens at a set time (a tennis match, dentist, class trip, party, game). Events only sit on the calendar: no checkbox, never crossed off, not in task lists.
+
+When the user says something *happens* at a time, add an event. When it's something they need to *do*, add a task, time-blocked if they gave a time. If it's unclear, ask.
+
 ## Commands
 
 | Goal | Command |
@@ -39,6 +46,7 @@ Never print, repeat, or summarize the sync code back to the user or into any fil
 | Schedule an existing task | `schedule <id> --next-free` · `schedule <id> --next-free --from 2026-10-01 --after 15:00` · `schedule <id> --date 2026-10-01 --time 16:00` |
 | Unschedule | `update-task <id> --unschedule` |
 | Open time | `free-slots --minutes 60` · `free-slots --date 2026-10-01 --minutes 30` |
+| Events | `events` · `add-event --title "Tennis match vs Central" --date 2026-10-02 --time 16:00 --end 18:00` · `update-event <id> --time 17:00` |
 | Notes | `notes --search biology` · `note <id>` · `add-note --title "…" --body-file draft.md --list School` · `update-note <id> --append "…"` |
 | Habits | `habits` · `check-habit "read"` · `check-habit "read" --undo` |
 | Focus line | `focus` (read) · `focus Finish the bio lab` (set) |
@@ -58,6 +66,6 @@ For long text (notes, drafts), write it to a file first and pass `--body-file`, 
 - **Habits:** a habit runs on specific days (`schedule` like "Mon, Wed, Fri") or a number of times per week. `summary` lists only the habits due today. Streaks skip rest days. Ticking a habit on a rest day counts as a bonus and never breaks anything.
 - **Estimates:** when the user says how long something takes, pass `--estimate` in minutes. Scheduling uses it as the block length.
 - **Adding and editing** tasks, notes, schedule blocks, habits and the focus line is allowed without asking first, but only for what the user asked for or what the work-ahead skill calls for.
-- **Deleting** (`delete-task`, `delete-note`) always needs the user's explicit OK in this conversation first. Say exactly what will be deleted.
+- **Deleting** (`delete-task`, `delete-event`, `delete-note`) always needs the user's explicit OK in this conversation first. Say exactly what will be deleted.
 - **Checking off tasks:** only mark a task done when the user says it's done. Never mark a task done because you drafted work for it; use the work-ahead flow instead.
 - **Afterward,** confirm what changed in one or two short lines, with dates written naturally ("Thursday Oct 1 at 4 PM"), and don't show ids.
