@@ -176,6 +176,8 @@ label.field, div.field { display: flex; flex-direction: column; gap: 5px; font-s
 /* ---------- Today ---------- */
 .today-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--gap); align-items: start; }
 .today-grid .span-2 { grid-column: 1 / -1; }
+.today-col { display: flex; flex-direction: column; gap: var(--gap); min-width: 0; }
+.today-grid .card .empty { padding: 8px 4px; }
 .focus-card { background: var(--accent-soft); border-color: transparent; box-shadow: none; }
 .focus-label { font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
 .focus-input { width: 100%; border: 0; background: transparent; outline: none; font-size: 21px; font-weight: 600; padding: 6px 0 2px; }
@@ -523,3 +525,11 @@ div.plan-row { grid-template-columns: 80px minmax(0, 1fr) auto; }
 .class-grade b { font-variant-numeric: tabular-nums; }
 .grade-pill { font-weight: 700; font-size: 13px; padding: 3px 10px; border-radius: 99px; background: color-mix(in srgb, var(--lc) 16%, var(--surface)); color: var(--text); white-space: nowrap; }
 @media (max-width: 800px) { .class-grid { grid-template-columns: minmax(0, 1fr); } }
+
+/* ---------- Width handles on shared calendar blocks ---------- */
+.block .wresize { position: absolute; top: 0; bottom: 8px; width: 10px; cursor: ew-resize; touch-action: none; z-index: 2; }
+.block .wresize.on-right { right: -3px; }
+.block .wresize.on-left { left: -3px; }
+.block .wresize::after { content: ""; position: absolute; top: 50%; left: 4px; width: 3px; height: 22px; margin-top: -11px; border-radius: 2px; background: var(--bc, var(--muted)); opacity: 0; transition: opacity .15s; }
+.block:hover .wresize::after, .block.resizing .wresize::after { opacity: .85; }
+@media (hover: none) { .block .wresize { width: 16px; } .block .wresize::after { opacity: .6; } }
