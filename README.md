@@ -20,6 +20,7 @@ The default passcode is **1234**. You can change it in Settings → Security.
 - **Tasks vs. events**:
   - **Tasks** live in lists, can be time-blocked, and get checked off. Scheduled tasks have a check circle right on their calendar block.
   - **Events** are added by clicking an empty time or with **New event** (for example a match, an appointment or a party). They only sit on the calendar: no checkbox, never crossed off, not in task lists.
+  - Events can repeat (every day, weekday, week, 2 weeks or month), optionally until a date, and single dates can be skipped.
   - Both block time for Next free slot and Plan my day, and either can be turned into the other.
 - **Scheduling helpers**:
   - Quick add understands plain English, like `essay fri 3pm 2h #school !high every week`, and shows a preview as you type.
@@ -36,6 +37,8 @@ The default passcode is **1234**. You can change it in Settings → Security.
 - **Time tracking**: the focus timer logs time against the linked task, including sessions stopped early, and auto-links whatever is on the calendar right now. Tasks show time spent. Stats compares estimates with actual time per list, and after 3 finished tasks, Plan my day and Split use that ratio to set realistic lengths.
 - **Busy times** (Settings → Schedule): repeating weekly blocks, such as a class timetable, that show on the calendar and are never scheduled over.
 - **Tasks**: search, plus filters for list, priority, due date and status. Add, edit and delete tasks and their subtasks. Tasks can repeat daily, on weekdays, weekly or monthly, and completing one creates the next occurrence.
+- **Classes**: one card per school subject with upcoming tests (countdown and what each covers), assignments due (with a quick-add box for that class), grades, and a points-based average with a letter grade.
+- **Tests and study plans**: add a test with its class, date, time and topics. **Plan studying** spreads one session per topic before the test, plus an optional full review the day before, each placed in free time as normal tasks. Re-planning keeps finished sessions. Today has a **Test countdown** with a live clock, study progress and the next session.
 - **Notes**: search with highlighting, auto-save, and linking to a list (with a jump to that list's open tasks).
 - **Habits**:
   - Each habit runs on specific days (Mon/Wed/Fri) or a number of times per week, has a list color and a reminder time, and can be added from one-tap templates (Lift, Tennis practice, Golf range, Latin vocab review and more).

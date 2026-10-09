@@ -19,6 +19,8 @@ If the tool reports "Not connected to Daybook yet", follow the first-time connec
 2. Skip any task where `claude_draft` is true. Its draft is already waiting for review. Only revisit it if the user asks, or if the task's notes show they want changes.
 3. Run `notes --search <topic>` for each candidate, to reuse anything the user has already written.
 
+4. Run `classes`. An upcoming test with listed topics is a great work-ahead target: make a study guide covering exactly those topics, attached to the test's next unfinished study session.
+
 ## 2. Choose
 
 Pick up to **3 tasks** per run, choosing the soonest due first, then high priority. A task qualifies only if Claude can produce something the user would genuinely use, from information it has or can research:

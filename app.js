@@ -14,15 +14,17 @@ const NAV = [
   { id: 'calendar', label: 'Calendar' },
   { id: 'tasks', label: 'Tasks' },
   { id: 'notes', label: 'Notes' },
+  { id: 'classes', label: 'Classes' },
   { id: 'habits', label: 'Habits' },
   { id: 'stats', label: 'Stats' },
   { id: 'settings', label: 'Settings', locked: true },
 ];
-const SECTIONS = { focus: 'Focus line', timer: 'Focus timer', schedule: 'Schedule', due: 'Due today', habits: 'Habits', goals: 'Goals' };
+const SECTIONS = { focus: 'Focus line', tests: 'Test countdown', timer: 'Focus timer', schedule: 'Schedule', due: 'Due today', habits: 'Habits', goals: 'Goals' };
 const ACCENTS = { indigo: '#4f46e5', teal: '#0d8f86', rose: '#d6285a', amber: '#c26a00', green: '#178a3e' };
 const PRIORITY = { none: 'None', low: 'Low', med: 'Medium', high: 'High' };
 const PRIO_RANK = { high: 0, med: 1, low: 2, none: 3 };
 const DURATIONS = [15, 30, 45, 60, 90, 120, 180, 240];
+const EVENT_REPEAT = { none: 'Does not repeat', daily: 'Every day', weekdays: 'Every weekday (Mon–Fri)', weekly: 'Every week', biweekly: 'Every 2 weeks', monthly: 'Every month' };
 const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6];
 const REPEAT = { none: 'Does not repeat', daily: 'Every day', weekdays: 'Every weekday (Mon–Fri)', weekly: 'Every week', monthly: 'Every month' };
 const REPEAT_SHORT = { daily: 'Daily', weekdays: 'Weekdays', weekly: 'Weekly', monthly: 'Monthly' };
@@ -48,6 +50,7 @@ const ICONS = {
   left: svg('<path d="m15 18-6-6 6-6"/>'),
   right: svg('<path d="m9 18 6-6-6-6"/>'),
   grip: svg('<circle cx="9" cy="6" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="18" r="1"/>'),
+  classes: svg('<path d="M22 10 12 5 2 10l10 5 10-5z"/><path d="M6 12v5c3 2 9 2 12 0v-5"/>'),
   bolt: svg('<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>'),
   bell: svg('<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/>'),
 };
@@ -94,6 +97,8 @@ function emptyState() {
     pomodoros: [],
     busy: [],
     events: [],
+    tests: [],
+    grades: [],
   };
 }
 
@@ -177,7 +182,7 @@ function load() {
 function normalize(s) {
   const base = emptyState();
   const out = { ...base, ...s, settings: { ...base.settings, ...(s.settings || {}) } };
-  for (const k of ['lists', 'tasks', 'notes', 'habits', 'goals', 'pomodoros', 'busy', 'events']) if (!Array.isArray(out[k])) out[k] = [];
+  for (const k of ['lists', 'tasks', 'notes', 'habits', 'goals', 'pomodoros', 'busy', 'events', 'tests', 'grades']) if (!Array.isArray(out[k])) out[k] = [];
   if (!out.lists.length) out.lists = base.lists;
   const known = new Set(out.settings.sections.map((x) => x.id));
   Object.keys(SECTIONS).forEach((id) => {
@@ -369,7 +374,25 @@ const busyOn = (ds) => { const wd = parse(ds).getDay(); return state.busy.filter
 /* Events are things placed straight on the calendar (a match, an appointment): they block time
    but have no checkbox, never get crossed off, and never appear in task lists. */
 const eventById = (id) => state.events.find((e) => e.id === id);
-const eventsOn = (ds) => state.events.filter((e) => e.date === ds).sort((a, b) => a.start - b.start);
+// A repeating event starts on ev.date and recurs by ev.repeat until ev.until, minus skipped dates.
+const isRepeating = (ev) => ev.repeat && ev.repeat !== 'none';
+function occursOn(ev, ds) {
+  if (!isRepeating(ev)) return ev.date === ds;
+  if (ds < ev.date || (ev.until && ds > ev.until) || (ev.skip || []).includes(ds)) return false;
+  const d = parse(ds), first = parse(ev.date);
+  switch (ev.repeat) {
+    case 'daily': return true;
+    case 'weekdays': return d.getDay() >= 1 && d.getDay() <= 5;
+    case 'weekly': return d.getDay() === first.getDay();
+    case 'biweekly': return d.getDay() === first.getDay() && Math.round(daysBetween(ev.date, ds) / 7) % 2 === 0;
+    case 'monthly': return d.getDate() === first.getDate();
+    default: return false;
+  }
+}
+// Occurrences of repeating events are copies dated `ds`, pointing back to their series.
+const eventsOn = (ds) => state.events.filter((e) => occursOn(e, ds))
+  .map((e) => (e.date === ds && !isRepeating(e) ? e : { ...e, date: ds, seriesId: e.id }))
+  .sort((a, b) => a.start - b.start);
 const eventColor = (ev) => (ev.listId && listById(ev.listId) ? `var(--c${listById(ev.listId).color})` : 'var(--accent)');
 // Calendar items are keyed "t:<id>" for tasks and "e:<id>" for events, so drag and resize handle both.
 function calItem(key) {
@@ -571,6 +594,57 @@ function openSplitModal(id) {
   openModal(`<div id="split-body">${splitModalHtml(t, ui.split.total, ui.split.len, finishBy)}</div>`);
 }
 
+/* ---------- Tests, study plans and grades ---------- */
+const testById = (id) => state.tests.find((t) => t.id === id);
+const testStart = (t) => parse(t.date).getTime() + fromHHMM(t.time || '08:00') * 60000;
+const upcomingTests = (days = 365, listId = null) => state.tests
+  .filter((t) => testStart(t) > Date.now() - 3 * 3600000 && t.date <= ymd(addDays(new Date(), days)) && (!listId || t.listId === listId))
+  .sort((a, b) => testStart(a) - testStart(b));
+const studyTasks = (test) => state.tasks.filter((x) => x.testId === test.id);
+function countdownText(ms) {
+  if (ms <= 0) return 'Now';
+  const s = Math.floor(ms / 1000), d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return `${d ? `${d}d ` : ''}${pad(h)}:${pad(m)}:${pad(sec)}`;
+}
+function daysLabel(test) {
+  const n = daysBetween(todayStr(), test.date);
+  return n <= 0 ? ['Today', ''] : n === 1 ? ['1', 'day'] : [String(n), 'days'];
+}
+// One session per topic spread from `start` to the day before the test, plus a full review that last day.
+function studyPlan(test, { len, start, review }) {
+  const items = test.topics.length ? test.topics.map((t) => `Study: ${t}`) : [`Study for ${test.title}`];
+  if (review) items.push(`Full review: ${test.title}`);
+  const T = todayStr();
+  start = start < T ? T : start;
+  let end = ymd(addDays(parse(test.date), -1));
+  if (end < start) end = start;
+  const span = daysBetween(start, end) + 1;
+  const spreadN = review ? items.length - 1 : items.length;
+  const spreadEnd = review && span > 1 ? daysBetween(start, end) - 1 : daysBetween(start, end);
+  const dayFor = (i) => {
+    if (review && i === items.length - 1) return end;
+    return ymd(addDays(parse(start), spreadN <= 1 ? 0 : Math.round((i * spreadEnd) / (spreadN - 1))));
+  };
+  const planned = [];
+  items.forEach((title, i) => {
+    const day = dayFor(i);
+    const slot = findSlot(len, day, 0, { days: Math.max(1, daysBetween(day, end) + 1), extra: planned.filter((x) => x.start != null).map((x) => ({ ...x, dur: x.dur + 10 })) });
+    planned.push(slot && slot.date <= end ? { title, date: slot.date, start: slot.start, dur: len } : { title, date: day, start: null, dur: len });
+  });
+  return planned;
+}
+function letterGrade(pct) {
+  const cut = [[93, 'A'], [90, 'A-'], [87, 'B+'], [83, 'B'], [80, 'B-'], [77, 'C+'], [73, 'C'], [70, 'C-'], [67, 'D+'], [60, 'D']];
+  return (cut.find(([c]) => pct >= c) || [0, 'F'])[1];
+}
+// Points-based class average: total earned over total possible.
+function classAverage(listId) {
+  const gs = state.grades.filter((g) => g.listId === listId && g.outOf > 0);
+  if (!gs.length) return null;
+  const pct = (gs.reduce((a, g) => a + g.score, 0) / gs.reduce((a, g) => a + g.outOf, 0)) * 100;
+  return { pct, letter: letterGrade(pct), count: gs.length };
+}
+
 /* Plain-English quick add: "Essay fri 3pm 2h #school !high every week" */
 const WD_RE = '([Ss]un(?:day)?|[Mm]on(?:day)?|[Tt]ue(?:s(?:day)?)?|[Ww]ed(?:nesday)?|[Tt]hu(?:r(?:s(?:day)?)?)?|[Ff]ri(?:day)?|[Ss]at(?:urday)?)';
 const MONTH_RE = '(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?';
@@ -660,7 +734,7 @@ function quickAdd(input) {
   if (!raw) return;
   const p = parseQuick(raw);
   const where = input.dataset.quickadd;
-  const listId = p.listId || detectList(p.title)?.id || (where === 'tasks' && !['all', 'school'].includes(ui.taskF.list) ? ui.taskF.list : state.lists[0].id);
+  const listId = p.listId || input.dataset.list || detectList(p.title)?.id || (where === 'tasks' && !['all', 'school'].includes(ui.taskF.list) ? ui.taskF.list : state.lists[0].id);
   const due = p.due || (where === 'today' ? todayStr() : null);
   state.tasks.push({
     id: uid(), title: p.title, listId, priority: p.priority, due, done: false, doneAt: null, notes: '', subtasks: [],
@@ -799,6 +873,25 @@ const TODAY_SECTIONS = {
       <input class="focus-input" data-bind="focus" value="${esc(state.focus[todayStr()] || '')}" placeholder="What one thing would make today a win?" aria-label="Today's focus">
     </section>`;
   },
+  tests() {
+    const up = upcomingTests(14);
+    const rows = up.map((t) => {
+      const l = listById(t.listId), [num, unit] = daysLabel(t), sessions = studyTasks(t);
+      const done = sessions.filter((x) => x.done).length;
+      const next = sessions.filter((x) => !x.done && x.block).sort((a, b) => (a.block.date + pad(a.block.start)).localeCompare(b.block.date + pad(b.block.start)))[0];
+      return `<div class="countdown" style="--lc:${listColor(t.listId)}">
+        <div class="cd-num"><b>${num}</b><span>${unit}</span></div>
+        <div class="cd-body">
+          <div class="row" style="gap:8px"><b class="spacer" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.title)}</b><span class="cd-clock" data-countdown="${testStart(t)}">${countdownText(testStart(t) - Date.now())}</span></div>
+          <div class="muted small">${l ? esc(l.name) + ' · ' : ''}${fmtDate(t.date, { weekday: 'short', month: 'short', day: 'numeric' })}, ${fmtTime(fromHHMM(t.time || '08:00'))}</div>
+          ${sessions.length ? `<div class="bar"><span style="width:${(done / sessions.length) * 100}%;background:var(--lc)"></span></div>
+            <div class="small muted">${done}/${sessions.length} study sessions${next ? ` · next ${next.block.date === todayStr() ? 'today' : fmtDate(next.block.date, { weekday: 'short' })} ${fmtTime(next.block.start)}` : ''}</div>`
+            : `<button class="btn sm" data-action="study-plan" data-id="${t.id}" style="margin-top:6px">${ICONS.bolt} Plan studying</button>`}
+        </div></div>`;
+    }).join('');
+    return `<section class="card"><div class="card-head"><h2>Test countdown</h2><button class="btn sm ghost" data-action="new-test">${ICONS.plus} Add test</button></div>
+      ${rows || '<div class="empty">No tests in the next two weeks.</div>'}</section>`;
+  },
   timer() {
     const tm = ui.timer, T = todayStr();
     const total = TIMER_MODES[tm.mode][1] * 60;
@@ -829,7 +922,7 @@ const TODAY_SECTIONS = {
       const { start, dur } = t.block;
       const isNow = now >= start && now < start + dur;
       if (t.ev) {
-        return `<div class="sched-item event ${isNow ? 'now' : ''}" style="--bc:${eventColor(t.ev)};border-left-color:var(--bc)" data-action="edit-event" data-id="${t.ev.id}">
+        return `<div class="sched-item event ${isNow ? 'now' : ''}" style="--bc:${eventColor(t.ev)};border-left-color:var(--bc)" data-action="edit-event" data-id="${t.ev.seriesId || t.ev.id}" data-date="${t.ev.date}">
           <span class="time">${fmtTime(start)}<br><span class="muted">${fmtTime(start + dur)}</span></span><span class="title">${esc(t.ev.title)}${isNow ? ' <span class="chip">Now</span>' : ''}</span></div>`;
       }
       if (t.busy) {
@@ -962,10 +1055,13 @@ function timeGrid(days) {
         return `<div class="block busy" data-action="edit-busy" data-id="${item.busy.id}" style="${pos}" title="${esc(item.busy.title)}"><b>${esc(item.busy.title)}</b>${time}</div>`;
       }
       if (item.ev) {
-        const ev = item.ev;
-        return `<div class="block event" draggable="true" data-drag="e:${ev.id}" data-action="edit-event" data-id="${ev.id}"
-          style="--bc:${eventColor(ev)};${pos}" title="${esc(ev.title)} (event)"><b>${esc(ev.title)}</b>${time}
-          <span class="resize" data-resize="e:${ev.id}" aria-hidden="true"></span></div>`;
+        const ev = item.ev, series = ev.seriesId;
+        return series
+          ? `<div class="block event" data-action="edit-event" data-id="${series}" data-date="${ev.date}"
+              style="--bc:${eventColor(ev)};${pos}" title="${esc(ev.title)} (repeats ${EVENT_REPEAT[ev.repeat].toLowerCase()})"><b>↻ ${esc(ev.title)}</b>${time}</div>`
+          : `<div class="block event" draggable="true" data-drag="e:${ev.id}" data-action="edit-event" data-id="${ev.id}"
+              style="--bc:${eventColor(ev)};${pos}" title="${esc(ev.title)} (event)"><b>${esc(ev.title)}</b>${time}
+              <span class="resize" data-resize="e:${ev.id}" aria-hidden="true"></span></div>`;
       }
       const t = item.t;
       return `<div class="block task-block ${t.done ? 'done' : ''}" draggable="true" data-drag="t:${t.id}" data-action="edit-task" data-id="${t.id}"
@@ -994,7 +1090,9 @@ function monthGrid() {
     const all = [...blocked, ...eventsOn(ds).map((ev) => ({ ev })), ...dueOnly]
       .sort((a, b) => (a.ev ? a.ev.start : a.block ? a.block.start : 9999) - (b.ev ? b.ev.start : b.block ? b.block.start : 9999));
     const chips = all.slice(0, 3).map((x) => x.ev
-      ? `<div class="mchip event" style="--bc:${eventColor(x.ev)}" draggable="true" data-drag="e:${x.ev.id}" data-action="edit-event" data-id="${x.ev.id}" title="${esc(x.ev.title)} (event)">${fmtTime(x.ev.start).replace(':00', '')} ${esc(x.ev.title)}</div>`
+      ? (x.ev.seriesId
+        ? `<div class="mchip event" style="--bc:${eventColor(x.ev)}" data-action="edit-event" data-id="${x.ev.seriesId}" data-date="${x.ev.date}" title="${esc(x.ev.title)} (repeating event)">${fmtTime(x.ev.start).replace(':00', '')} ↻ ${esc(x.ev.title)}</div>`
+        : `<div class="mchip event" style="--bc:${eventColor(x.ev)}" draggable="true" data-drag="e:${x.ev.id}" data-action="edit-event" data-id="${x.ev.id}" title="${esc(x.ev.title)} (event)">${fmtTime(x.ev.start).replace(':00', '')} ${esc(x.ev.title)}</div>`)
       : `<div class="mchip ${x.done ? 'done' : ''}" style="--bc:${listColor(x.listId)}" draggable="true" data-drag="t:${x.id}" data-action="edit-task" data-id="${x.id}" title="${esc(x.title)}">${x.block ? `${fmtTime(x.block.start).replace(':00', '')} ` : ''}${esc(x.title)}</div>`).join('');
     const more = all.length > 3 ? `<div class="muted small">+${all.length - 3} more</div>` : '';
     return `<div class="mcell ${day.getMonth() !== d.getMonth() ? 'other' : ''} ${ds === T ? 'is-today' : ''}" data-action="open-day" data-day="${ds}"><div class="mnum">${day.getDate()}</div>${chips}${more}</div>`;
@@ -1226,6 +1324,7 @@ function completionChart(days, counts) {
   }).join('');
   return `<svg class="chart-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Tasks completed per day, last 14 days">${grid}${bars}</svg>`;
 }
+const rangeDays = (from, to) => Array.from({ length: Math.max(0, daysBetween(from, to) + 1) }, (_, i) => ymd(addDays(parse(from), i)));
 function estimatesCard() {
   const rows = state.lists.map((l) => ({ l, xs: estimateSamples(l.id) })).filter((r) => r.xs.length);
   const all = estimateSamples(null);
@@ -1250,7 +1349,7 @@ function viewStats() {
   const [from, to] = ui.hoursRange === 'week' ? [ymd(wk), ymd(addDays(wk, 6))] : [lastNDays(30)[0], todayStr()];
   const byList = state.lists.map((l) => ({
     l, min: state.tasks.filter((t) => t.listId === l.id && t.block && t.block.date >= from && t.block.date <= to).reduce((a, t) => a + t.block.dur, 0)
-      + state.events.filter((ev) => ev.listId === l.id && ev.date >= from && ev.date <= to).reduce((a, ev) => a + ev.dur, 0),
+      + rangeDays(from, to).reduce((a, ds) => a + eventsOn(ds).filter((ev) => ev.listId === l.id).reduce((b, ev) => b + ev.dur, 0), 0),
   })).sort((a, b) => b.min - a.min);
   const maxMin = Math.max(1, ...byList.map((x) => x.min));
   const totalBlocked = byList.reduce((a, x) => a + x.min, 0);
@@ -1372,7 +1471,56 @@ function viewSettings() {
   </div>`;
 }
 
-const VIEWS = { today: viewToday, calendar: viewCalendar, tasks: viewTasks, notes: viewNotes, habits: viewHabits, stats: viewStats, settings: viewSettings };
+function viewClasses() {
+  const subjects = state.lists.filter((l) => l.kind === 'subject');
+  const general = state.lists.filter((l) => l.kind === 'school');
+  const T = todayStr();
+  const card = (l) => {
+    const avg = classAverage(l.id);
+    const tests = upcomingTests(365, l.id);
+    const pastNoGrade = state.tests.filter((t) => t.listId === l.id && testStart(t) <= Date.now() && !state.grades.some((g) => g.testId === t.id)).slice(-2);
+    const assignments = state.tasks.filter((t) => t.listId === l.id && !t.done && !t.testId && !t.parentId).sort(taskSort);
+    const grades = state.grades.filter((g) => g.listId === l.id).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    const testRow = (t, past = false) => {
+      const [num, unit] = daysLabel(t), ss = studyTasks(t), done = ss.filter((x) => x.done).length;
+      return `<div class="class-test">
+        <div class="cd-num sm"><b>${past ? '✓' : num}</b><span>${past ? 'done' : unit}</span></div>
+        <div style="min-width:0;flex:1">
+          <b>${esc(t.title)}</b>
+          <div class="muted small">${fmtDate(t.date, { weekday: 'short', month: 'short', day: 'numeric' })}, ${fmtTime(fromHHMM(t.time || '08:00'))}</div>
+          ${t.topics.length ? `<div class="topics">${t.topics.map((x) => `<span class="chip">${esc(x)}</span>`).join('')}</div>` : '<div class="muted small">No topics added yet.</div>'}
+          ${past ? '' : ss.length ? `<div class="small muted">${done}/${ss.length} study sessions done</div>` : ''}
+        </div>
+        <div class="row" style="gap:4px;flex-wrap:wrap;justify-content:flex-end">
+          ${past ? `<button class="btn sm primary" data-action="new-grade" data-list="${l.id}" data-test="${t.id}">Add grade</button>`
+            : `<button class="btn sm" data-action="study-plan" data-id="${t.id}">${ss.length ? 'Re-plan' : `${ICONS.bolt} Plan studying`}</button>`}
+          <button class="btn icon ghost sm" data-action="edit-test" data-id="${t.id}" aria-label="Edit test">${ICONS.edit}</button>
+        </div></div>`;
+    };
+    return `<section class="card class-card" style="--lc:var(--c${l.color})">
+      <div class="card-head"><h2 class="row" style="gap:8px"><span class="dot" style="background:var(--lc);width:12px;height:12px"></span>${esc(l.name)}</h2>
+        ${avg ? `<span class="grade-pill" data-tip="${avg.count} grade${avg.count === 1 ? '' : 's'}">${avg.letter} · ${avg.pct.toFixed(1)}%</span>` : '<span class="muted small">No grades yet</span>'}</div>
+      <div class="class-sec"><div class="class-label">Tests<button class="btn sm ghost" data-action="new-test" data-list="${l.id}">${ICONS.plus} Add</button></div>
+        ${tests.map((t) => testRow(t)).join('')}${pastNoGrade.map((t) => testRow(t, true)).join('')}
+        ${tests.length || pastNoGrade.length ? '' : '<div class="muted small">No tests coming up.</div>'}</div>
+      <div class="class-sec"><div class="class-label">Assignments due</div>
+        ${assignments.slice(0, 6).map((t) => `<div class="class-task"><input type="checkbox" class="check round" data-action="toggle-task" data-id="${t.id}" aria-label="Complete ${esc(t.title)}">
+          <span class="task-title spacer" data-action="edit-task" data-id="${t.id}">${esc(t.title)}</span>${t.due ? `<span class="chip ${t.due < T ? 'overdue' : ''}">${dueLabel(t.due)}</span>` : ''}</div>`).join('')}
+        ${assignments.length > 6 ? `<button class="btn sm ghost" data-action="class-tasks" data-list="${l.id}">See all ${assignments.length}</button>` : ''}
+        <input class="input" data-quickadd="class" data-list="${l.id}" placeholder="Add an assignment, like “worksheet 3.2 fri”" aria-label="Add ${esc(l.name)} assignment" style="margin-top:6px"></div>
+      <div class="class-sec"><div class="class-label">Grades<button class="btn sm ghost" data-action="new-grade" data-list="${l.id}">${ICONS.plus} Add</button></div>
+        ${grades.slice(0, 5).map((g) => `<div class="class-grade"><span class="spacer">${esc(g.title)}</span><span class="muted small">${g.date ? fmtDate(g.date) : ''}</span>
+          <b>${g.score}/${g.outOf}</b><span class="chip">${Math.round((g.score / g.outOf) * 100)}%</span>
+          <button class="btn icon ghost sm" data-action="edit-grade" data-id="${g.id}" aria-label="Edit grade">${ICONS.edit}</button></div>`).join('') || '<div class="muted small">No grades yet.</div>'}</div>
+    </section>`;
+  };
+  const generalCards = general.filter((l) => state.tests.some((t) => t.listId === l.id) || state.grades.some((g) => g.listId === l.id) || state.tasks.some((t) => t.listId === l.id && !t.done));
+  return pageHead('Classes', 'Tests, assignments and grades for each class.', `<button class="btn primary" data-action="new-test">${ICONS.plus} Add test</button>`) +
+    (subjects.length ? `<div class="class-grid">${[...subjects, ...generalCards].map(card).join('')}</div>`
+      : '<div class="card empty">No school subjects yet. In Settings → Lists & colors, set a list’s type to Subject.</div>');
+}
+
+const VIEWS = { today: viewToday, calendar: viewCalendar, tasks: viewTasks, classes: viewClasses, notes: viewNotes, habits: viewHabits, stats: viewStats, settings: viewSettings };
 
 /* =========================================================
    Modals & toasts
@@ -1507,9 +1655,10 @@ function openBusyModal(id) {
     <div class="modal-foot">${id ? `<button type="button" class="btn danger" data-action="delete-busy" data-id="${id}">Delete</button>` : ''}<span class="spacer"></span>
       <button type="button" class="btn" data-action="close-modal">Cancel</button><button class="btn primary">Save</button></div></form>`);
 }
-function openEventModal(id, defaults = {}) {
-  const ev = id ? eventById(id) : { title: '', date: ui.calDate, start: nextSlot(), dur: 60, listId: null, notes: '', ...defaults };
+function openEventModal(id, defaults = {}, occDate = null) {
+  const ev = id ? eventById(id) : { title: '', date: ui.calDate, start: nextSlot(), dur: 60, listId: null, notes: '', repeat: 'none', until: '', ...defaults };
   if (!ev) return;
+  const rep = isRepeating(ev);
   openModal(`<form data-form="event" data-id="${id || ''}"><h2>${id ? 'Edit event' : 'New event'}</h2>
     <p class="muted small" style="margin:-8px 0 14px">Events sit on your calendar only. They don't appear in task lists and don't get checked off.</p>
     <div class="fields">
@@ -1518,16 +1667,78 @@ function openEventModal(id, defaults = {}) {
       <div class="field">Color ${listPickerHtml(ev.listId, { autosort: !id, allowNone: true, label: 'Color', noneLabel: 'Accent color' })}</div>
       <label class="field">Starts<input class="input" type="time" step="300" name="start" value="${toHHMM(ev.start)}" required></label>
       <label class="field">Ends<input class="input" type="time" step="300" name="end" value="${toHHMM(Math.min(ev.start + ev.dur, 1439))}" required></label>
+      <label class="field">Repeat<select class="input" name="repeat" data-event-repeat>${Object.entries(EVENT_REPEAT).map(([v, l]) => `<option value="${v}" ${(ev.repeat || 'none') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="field ${rep ? '' : 'hidden'}" data-until>Until (optional)<input class="input" type="date" name="until" value="${ev.until || ''}"></label>
       <label class="field full">Notes<textarea class="input" name="notes" rows="2" placeholder="Location, what to bring…">${esc(ev.notes || '')}</textarea></label>
     </div>
+    ${rep && id ? `<p class="small muted" style="margin:10px 0 0">This repeats. Changes here apply to every time it happens${(ev.skip || []).length ? `, and ${ev.skip.length} date${ev.skip.length === 1 ? ' is' : 's are'} skipped` : ''}.</p>` : ''}
     <div class="small" id="event-msg" style="color:var(--danger);margin-top:8px"></div>
     <div class="modal-foot">
-      ${id ? `<button type="button" class="btn danger" data-action="delete-event" data-id="${id}">Delete</button>` : ''}
-      <button type="button" class="btn ghost" data-action="event-to-task" data-id="${id || ''}">Make it a task instead</button>
+      ${id ? `<button type="button" class="btn danger" data-action="delete-event" data-id="${id}">${rep ? 'Delete all' : 'Delete'}</button>` : ''}
+      ${rep && id && occDate ? `<button type="button" class="btn" data-action="skip-occurrence" data-id="${id}" data-date="${occDate}">Skip ${fmtDate(occDate, { weekday: 'short', month: 'short', day: 'numeric' })} only</button>` : ''}
+      ${rep ? '' : `<button type="button" class="btn ghost" data-action="event-to-task" data-id="${id || ''}">Make it a task instead</button>`}
       <span class="spacer"></span>
       <button type="button" class="btn" data-action="close-modal">Cancel</button>
       <button class="btn primary">Save</button>
     </div></form>`);
+}
+const subjectLists = () => state.lists.filter(isSchool);
+function openTestModal(id, listId) {
+  const t = id ? testById(id) : { title: '', listId: listId || subjectLists()[0]?.id || state.lists[0].id, date: ymd(addDays(new Date(), 7)), time: '08:00', topics: [], notes: '' };
+  openModal(`<form data-form="test" data-id="${id || ''}"><h2>${id ? 'Edit test' : 'Add a test'}</h2>
+    <div class="fields">
+      <label class="field full">Test<input class="input" name="title" required value="${esc(t.title)}" placeholder="Unit 3 test, AP exam, vocab quiz…"></label>
+      <div class="field">Class ${listPickerHtml(t.listId, { label: 'Class' })}</div>
+      <div class="fields" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <label class="field">Date<input class="input" type="date" name="date" value="${t.date}" required></label>
+        <label class="field">Time<input class="input" type="time" name="time" value="${t.time || '08:00'}" required></label></div>
+      <label class="field full">What's on it<textarea class="input" name="topics" rows="4" placeholder="One topic per line, like:&#10;Causes of the Civil War&#10;Reconstruction&#10;DBQ practice">${esc(t.topics.join('\n'))}</textarea>
+        <span class="hint">Each topic becomes a study session when you plan studying.</span></label>
+      <label class="field full">Notes<input class="input" name="notes" value="${esc(t.notes || '')}" placeholder="Room, allowed calculator, chapters…"></label>
+    </div>
+    <div class="modal-foot">
+      ${id ? `<button type="button" class="btn danger" data-action="delete-test" data-id="${id}">Delete</button>` : ''}
+      <span class="spacer"></span><button type="button" class="btn" data-action="close-modal">Cancel</button>
+      <button class="btn" name="after" value="save">Save</button>
+      <button class="btn primary" name="after" value="plan">${ICONS.bolt} Save &amp; plan studying</button>
+    </div></form>`);
+}
+function studyModalHtml(test) {
+  const o = ui.study, plan = studyPlan(test, o), existing = studyTasks(test).filter((x) => !x.done);
+  return `<h2>Study plan for “${esc(test.title)}”</h2>
+    <p class="muted small" style="margin:-8px 0 12px">${listById(test.listId) ? esc(listById(test.listId).name) + ' · ' : ''}test ${fmtDate(test.date, { weekday: 'long', month: 'short', day: 'numeric' })} at ${fmtTime(fromHHMM(test.time || '08:00'))}</p>
+    <div class="fields" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+      <label class="field">Each session<select class="input" id="study-len" data-study>${[30, 45, 60, 90].map((v) => `<option value="${v}" ${v === o.len ? 'selected' : ''}>${fmtDur(v)}</option>`).join('')}</select></label>
+      <label class="field">Start<input class="input" type="date" id="study-start" data-study value="${o.start}" min="${todayStr()}" max="${test.date}"></label>
+      <label class="field">Review day<span class="row" style="height:36px;font-weight:500;color:var(--text)"><input type="checkbox" class="check" id="study-review" data-study ${o.review ? 'checked' : ''}> Full review before</span></label>
+    </div>
+    ${test.topics.length ? '' : '<p class="small" style="margin:10px 0 0">No topics on this test yet, so this is one general session. <button type="button" class="btn sm ghost" data-action="edit-test" data-id="' + test.id + '">Add topics</button></p>'}
+    <div class="stack" style="gap:6px;margin-top:14px">${plan.map((x) => `<div class="plan-row" style="--lc:${listColor(test.listId)}">
+      <span class="time">${fmtDate(x.date, { weekday: 'short', month: 'short', day: 'numeric' })}</span>
+      <span class="title">${esc(x.title)}</span>
+      <span class="chip">${x.start != null ? `${fmtTime(x.start)} · ${fmtDur(x.dur)}` : 'no free time, unscheduled'}</span></div>`).join('')}</div>
+    ${existing.length ? `<p class="small muted" style="margin:10px 0 0">Replaces the ${existing.length} unfinished study session${existing.length === 1 ? '' : 's'} already planned. Finished ones stay.</p>` : ''}
+    <div class="modal-foot"><span class="spacer"></span><button class="btn" data-action="close-modal">Cancel</button>
+      <button class="btn primary" data-action="study-apply" data-id="${test.id}">Add ${plan.length} session${plan.length === 1 ? '' : 's'}</button></div>`;
+}
+function openStudyModal(id) {
+  const test = testById(id);
+  ui.study = { id, len: ui.study?.len || 45, start: todayStr(), review: true };
+  openModal(`<div id="study-body">${studyModalHtml(test)}</div>`);
+}
+function openGradeModal(id, listId, testId) {
+  const test = testId && testById(testId);
+  const g = id ? state.grades.find((x) => x.id === id) : { title: test ? test.title : '', listId: listId || test?.listId || subjectLists()[0]?.id, score: '', outOf: 100, date: test ? test.date : todayStr(), testId: testId || null };
+  openModal(`<form data-form="grade" data-id="${id || ''}" data-test="${g.testId || ''}"><h2>${id ? 'Edit grade' : 'Add a grade'}</h2>
+    <div class="fields">
+      <label class="field full">What it was for<input class="input" name="title" required value="${esc(g.title)}" placeholder="Unit 3 test, Essay 2, Quiz 4…"></label>
+      <div class="field">Class ${listPickerHtml(g.listId, { label: 'Class' })}</div>
+      <label class="field">Date<input class="input" type="date" name="date" value="${g.date || ''}"></label>
+      <label class="field">Score<input class="input" type="number" step="any" min="0" name="score" value="${g.score}" required placeholder="e.g. 46"></label>
+      <label class="field">Out of<input class="input" type="number" step="any" min="1" name="outOf" value="${g.outOf}" required></label>
+    </div>
+    <div class="modal-foot">${id ? `<button type="button" class="btn danger" data-action="delete-grade" data-id="${id}">Delete</button>` : ''}<span class="spacer"></span>
+      <button type="button" class="btn" data-action="close-modal">Cancel</button><button class="btn primary">Save</button></div></form>`);
 }
 function openHabitModal(id) {
   const h = id ? habitById(id) : { name: '', days: [1, 2, 3, 4, 5], goal: 3, reminder: '', listId: null };
@@ -1587,11 +1798,34 @@ const FORMS = {
     taskById(f.dataset.id).block = { date: d.get('date'), start: fromHHMM(d.get('start')), dur: +d.get('dur') };
     commit(`Scheduled for ${fmtDate(d.get('date'))} at ${fmtTime(fromHHMM(d.get('start')))}`);
   },
+  test(f, e) {
+    const d = new FormData(f);
+    const fields = { title: d.get('title').trim(), listId: d.get('listId'), date: d.get('date'), time: d.get('time') || '08:00',
+      topics: (d.get('topics') || '').split('\n').map((x) => x.replace(/^[-*•\d.)\s]+/, '').trim()).filter(Boolean), notes: d.get('notes') || '' };
+    let test;
+    if (f.dataset.id) test = Object.assign(testById(f.dataset.id), fields);
+    else { test = { id: uid(), createdAt: Date.now(), ...fields }; state.tests.push(test); }
+    save();
+    if (e?.submitter?.value === 'plan') { closeModal(); render(); openStudyModal(test.id); return; }
+    commit(f.dataset.id ? 'Test saved' : `Test added: ${daysLabel(test).join(' ')} to go`);
+  },
+  grade(f) {
+    const d = new FormData(f);
+    const fields = { title: d.get('title').trim(), listId: d.get('listId'), date: d.get('date') || null, score: +d.get('score'), outOf: +d.get('outOf'), testId: f.dataset.test || null };
+    if (!(fields.outOf > 0)) return;
+    if (f.dataset.id) Object.assign(state.grades.find((x) => x.id === f.dataset.id), fields);
+    else state.grades.push({ id: uid(), ...fields });
+    const avg = classAverage(fields.listId);
+    commit(`Grade saved${avg ? `. ${listById(fields.listId).name} is now ${avg.letter} (${avg.pct.toFixed(1)}%)` : ''}`);
+  },
   event(f) {
     const d = new FormData(f);
     const start = fromHHMM(d.get('start')), end = fromHHMM(d.get('end'));
     if (end <= start) { $('#event-msg').textContent = 'The end time needs to be after the start time.'; return; }
-    const fields = { title: d.get('title').trim(), date: d.get('date'), start, dur: end - start, listId: d.get('listId') || null, notes: d.get('notes') || '' };
+    const repeat = d.get('repeat') || 'none';
+    const until = repeat !== 'none' ? d.get('until') || '' : '';
+    if (until && until < d.get('date')) { $('#event-msg').textContent = 'The repeat end date needs to be after the first date.'; return; }
+    const fields = { title: d.get('title').trim(), date: d.get('date'), start, dur: end - start, listId: d.get('listId') || null, notes: d.get('notes') || '', repeat, until };
     if (!fields.title) return;
     if (f.dataset.id) Object.assign(eventById(f.dataset.id), fields);
     else state.events.push({ id: uid(), createdAt: Date.now(), ...fields });
@@ -1643,15 +1877,47 @@ function commit(msg) { save(); closeModal(); render(); if (msg) toast(msg); }
    ========================================================= */
 const ACTIONS = {
   'toggle-nav': () => app.classList.toggle('nav-open'),
+  'new-test': (el) => openTestModal(null, el.dataset.list),
+  'edit-test': (el) => openTestModal(el.dataset.id),
+  'delete-test': (el) => {
+    const t = testById(el.dataset.id), open = studyTasks(t).filter((x) => !x.done);
+    askConfirm(open.length ? `Delete “${t.title}” and its ${open.length} unfinished study session${open.length === 1 ? '' : 's'}?` : `Delete “${t.title}”?`, 'Delete', () => {
+      state.tests = state.tests.filter((x) => x !== t);
+      state.tasks = state.tasks.filter((x) => !open.includes(x));
+      commit('Test deleted');
+    });
+  },
+  'study-plan': (el) => openStudyModal(el.dataset.id),
+  'study-apply': (el) => {
+    const test = testById(el.dataset.id), plan = studyPlan(test, ui.study), undo = snapshot();
+    state.tasks = state.tasks.filter((x) => !(x.testId === test.id && !x.done));
+    plan.forEach((x) => state.tasks.push({
+      id: uid(), title: x.title, listId: test.listId, priority: 'med', due: x.date, done: false, doneAt: null,
+      notes: `Studying for “${test.title}” on ${fmtDate(test.date, { weekday: 'long', month: 'short', day: 'numeric' })}.`, subtasks: [], repeat: 'none',
+      est: x.dur, createdAt: Date.now(), testId: test.id, block: x.start != null ? { date: x.date, start: x.start, dur: x.dur } : null,
+    }));
+    closeModal(); save(); render();
+    toast(`Planned ${plan.length} study session${plan.length === 1 ? '' : 's'} before ${fmtDate(test.date, { weekday: 'long' })}`, undo);
+  },
+  'new-grade': (el) => openGradeModal(null, el.dataset.list, el.dataset.test),
+  'edit-grade': (el) => openGradeModal(el.dataset.id),
+  'delete-grade': (el) => askConfirm('Delete this grade?', 'Delete', () => { state.grades = state.grades.filter((g) => g.id !== el.dataset.id); commit('Grade deleted'); }),
+  'class-tasks': (el) => { ui.taskF = { ...ui.taskF, list: el.dataset.list, status: 'open' }; location.hash = 'tasks'; },
   'new-event': () => {
     const date = ui.calDate >= todayStr() ? ui.calDate : todayStr();
     const slot = findSlot(60, date, 0, { days: 1 });
     openEventModal(null, { date, start: slot?.date === date ? slot.start : nextSlot() });
   },
-  'edit-event': (el) => openEventModal(el.dataset.id),
+  'edit-event': (el) => openEventModal(el.dataset.id, {}, el.dataset.date || null),
+  'skip-occurrence': (el) => {
+    const ev = eventById(el.dataset.id), undo = snapshot();
+    ev.skip = [...new Set([...(ev.skip || []), el.dataset.date])];
+    closeModal(); save(); render();
+    toast(`Skipped ${ev.title} on ${fmtDate(el.dataset.date, { weekday: 'long', month: 'short', day: 'numeric' })}`, undo);
+  },
   'delete-event': (el) => {
     const ev = eventById(el.dataset.id);
-    askConfirm(`Delete the event “${ev.title}”?`, 'Delete', () => {
+    askConfirm(isRepeating(ev) ? `Delete “${ev.title}” and every time it repeats?` : `Delete the event “${ev.title}”?`, 'Delete', () => {
       state.events = state.events.filter((x) => x !== ev);
       commit('Event deleted');
     });
@@ -2126,7 +2392,7 @@ document.addEventListener('click', (e) => {
 
 document.addEventListener('submit', (e) => {
   e.preventDefault();
-  FORMS[e.target.dataset.form]?.(e.target);
+  FORMS[e.target.dataset.form]?.(e.target, e);
 });
 
 document.addEventListener('input', (e) => {
@@ -2140,7 +2406,7 @@ document.addEventListener('input', (e) => {
   }
   else if (t.dataset.quickadd) {
     const box = t.parentElement.querySelector('[data-qa-preview]');
-    box.innerHTML = t.value.trim() ? quickPreview(parseQuick(t.value)) || '<span class="muted small">No date or time found</span>' : `<span class="muted small">${esc(quickHint())}</span>`;
+    if (box) box.innerHTML = t.value.trim() ? quickPreview(parseQuick(t.value)) || '<span class="muted small">No date or time found</span>' : `<span class="muted small">${esc(quickHint())}</span>`;
   }
   else if (t.dataset.filter) { ui.taskF[t.dataset.filter] = t.value; $('#task-list').innerHTML = taskListHtml(); }
   else if (t.hasAttribute('data-note-search')) { ui.noteQ = t.value; $('#note-items').innerHTML = noteItemsHtml(); }
@@ -2168,6 +2434,13 @@ document.addEventListener('change', (e) => {
     state.settings[t.dataset.setting] = t.value;
     if (state.settings.dayEnd <= state.settings.dayStart) { toast('The day has to end after it starts'); state.settings.dayEnd = '22:00'; render(); }
     save();
+  } else if (t.hasAttribute('data-event-repeat')) {
+    t.form.querySelector('[data-until]').classList.toggle('hidden', t.value === 'none');
+  } else if (t.hasAttribute('data-study') && ui.study) {
+    ui.study.len = +$('#study-len').value;
+    if ($('#study-start').value) ui.study.start = $('#study-start').value;
+    ui.study.review = $('#study-review').checked;
+    $('#study-body').innerHTML = studyModalHtml(testById(ui.study.id));
   } else if (t.hasAttribute('data-habit-mode')) {
     $$('[data-mode-panel]', t.form).forEach((p) => p.classList.toggle('hidden', p.dataset.modePanel !== t.value));
   } else if (t.dataset.planToggle) {
@@ -2453,6 +2726,7 @@ setInterval(() => {
     $('#timer-bar').style.width = `${(1 - tm.left / (TIMER_MODES[tm.mode][1] * 60)) * 100}%`;
   }
   document.title = tm.running ? `${timerText()} · ${TIMER_MODES[tm.mode][0]}` : 'Daybook';
+  $$('[data-countdown]').forEach((el) => { el.textContent = countdownText(+el.dataset.countdown - Date.now()); });
 }, 1000);
 
 /* ---------- Deferred rendering ----------

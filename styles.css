@@ -498,3 +498,28 @@ div.plan-row { grid-template-columns: 80px minmax(0, 1fr) auto; }
 .mchip.done { text-decoration: line-through; color: var(--muted); }
 .sched-item.event { background: color-mix(in srgb, var(--bc) 22%, var(--surface)); font-weight: 600; }
 .sched-item .check { width: 16px; height: 16px; }
+
+/* ---------- Tests, countdowns, classes ---------- */
+.countdown { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 12px; align-items: center; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); border-left: 4px solid var(--lc); margin-bottom: 8px; }
+.countdown:last-child { margin-bottom: 0; }
+.cd-num { display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 56px; padding: 6px 4px; border-radius: 10px; background: color-mix(in srgb, var(--lc) 14%, var(--surface)); line-height: 1; }
+.cd-num b { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text); }
+.cd-num span { font-size: 11px; color: var(--text-2); margin-top: 3px; }
+.cd-num.sm { min-width: 46px; padding: 5px 3px; }
+.cd-num.sm b { font-size: 18px; }
+.cd-body { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.cd-body .bar { margin-top: 4px; }
+.cd-clock { font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 600; color: var(--text-2); white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.class-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: var(--gap); align-items: start; }
+.class-card { border-top: 4px solid var(--lc); }
+.class-sec { padding: 10px 0; border-top: 1px solid var(--border); }
+.class-sec:first-of-type { border-top: 0; padding-top: 0; }
+.class-label { display: flex; align-items: center; justify-content: space-between; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+.class-test { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; }
+.class-test .cd-num { --lc: inherit; }
+.topics { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 2px; }
+.class-task, .class-grade { display: flex; align-items: center; gap: 8px; padding: 4px 0; min-width: 0; }
+.class-task .task-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.class-grade b { font-variant-numeric: tabular-nums; }
+.grade-pill { font-weight: 700; font-size: 13px; padding: 3px 10px; border-radius: 99px; background: color-mix(in srgb, var(--lc) 16%, var(--surface)); color: var(--text); white-space: nowrap; }
+@media (max-width: 800px) { .class-grid { grid-template-columns: minmax(0, 1fr); } }
