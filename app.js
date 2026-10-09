@@ -778,6 +778,7 @@ function render() {
   const v = currentView();
   main.innerHTML = VIEWS[v]();
   if (v === 'calendar') afterCalendar();
+  if (v === 'today') balanceToday();
 }
 
 /* ---------- Shared bits ---------- */
@@ -986,6 +987,33 @@ function catchUpCard() {
       <button class="btn" data-action="catchup-clear">Unschedule all</button></div>
   </section>`;
 }
+// Two independent columns instead of grid rows, so a short card never leaves a gap beside a
+// tall one. Cards keep their order and each goes into whichever column is shorter so far.
+// Full-width cards (catch-up, focus line) stay across the top; phones keep one column.
+const TWO_COLUMNS = 800;
+function balanceToday() {
+  const grid = $('.today-grid');
+  if (!grid || innerWidth <= TWO_COLUMNS) return;
+  const cards = [...grid.children].filter((c) => !c.classList.contains('span-2'));
+  if (cards.length < 2) return;
+  const gap = parseFloat(getComputedStyle(grid).rowGap) || 14;
+  const heights = cards.map((c) => c.getBoundingClientRect().height);
+  const cols = [0, 1].map(() => Object.assign(document.createElement('div'), { className: 'today-col' }));
+  const used = [0, 0];
+  cards.forEach((c, i) => {
+    const k = used[0] <= used[1] ? 0 : 1;
+    cols[k].append(c);
+    used[k] += heights[i] + gap;
+  });
+  grid.append(...cols);
+  grid.classList.add('balanced');
+}
+let wasTwoColumns = innerWidth > TWO_COLUMNS;
+window.addEventListener('resize', () => {
+  const now = innerWidth > TWO_COLUMNS;
+  if (now !== wasTwoColumns && currentView() === 'today' && !isEditing()) render();
+  wasTwoColumns = now;
+});
 function viewToday() {
   const h = new Date().getHours();
   const hello = h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
@@ -1009,10 +1037,31 @@ function calTitle() {
   const days = calDays();
   return `${fmtDate(days[0])} – ${fmtDate(days[6])}, ${parse(days[6]).getFullYear()}`;
 }
+// Everything drawn in one day column, keyed "t:"/"e:"/"b:" so drag and width handles can find it.
+function dayItems(ds) {
+  return [
+    ...state.tasks.filter((t) => t.block && t.block.date === ds).map((t) => ({ t, block: t.block, key: `t:${t.id}` })),
+    ...eventsOn(ds).map((ev) => ({ ev, block: ev, key: `e:${ev.seriesId || ev.id}` })),
+    ...busyOn(ds).map((b) => ({ busy: b, block: { start: b.start, dur: b.end - b.start }, key: `b:${b.id}` })),
+  ].sort((a, b) => a.block.start - b.block.start || b.block.dur - a.block.dur);
+}
+// Width weight of a calendar item: 1 by default; dragging a side handle changes it.
+function weightOf(key) {
+  const id = key.slice(2);
+  const w = key[0] === 't' ? taskById(id)?.block?.w : key[0] === 'e' ? eventById(id)?.w : state.busy.find((b) => b.id === id)?.w;
+  return w > 0 ? w : 1;
+}
+function setWeight(key, w) {
+  const id = key.slice(2);
+  const obj = key[0] === 't' ? taskById(id)?.block : key[0] === 'e' ? eventById(id) : state.busy.find((b) => b.id === id);
+  if (!obj) return;
+  if (w == null || Math.abs(w - 1) < 0.01) delete obj.w; else obj.w = Math.round(w * 100) / 100;
+}
 function layoutDay(items) {
-  // Assign overlapping blocks to side-by-side lanes.
+  // Overlapping blocks share the column in side-by-side lanes. Each lane's width is
+  // proportional to its widest item's weight, so equal by default (2 = halves, 3 = thirds).
   const out = [];
-  let cluster = [], end = -1;
+  let cluster = [], end = -1, clusterNo = 0;
   const flush = () => {
     const lanes = [];
     const placed = cluster.map((t) => {
@@ -1021,7 +1070,13 @@ function layoutDay(items) {
       lanes[i] = t.block.start + t.block.dur;
       return { t, lane: i };
     });
-    placed.forEach((p) => out.push({ ...p, lanes: lanes.length }));
+    const laneW = lanes.map((_, i) => Math.max(...placed.filter((p) => p.lane === i).map((p) => (p.t.key ? weightOf(p.t.key) : 1))));
+    const total = laneW.reduce((a, b) => a + b, 0);
+    placed.forEach((p) => {
+      const before = laneW.slice(0, p.lane).reduce((a, b) => a + b, 0);
+      out.push({ ...p, lanes: lanes.length, left: before / total, width: laneW[p.lane] / total, cluster: clusterNo });
+    });
+    clusterNo++;
     cluster = [];
   };
   items.forEach((t) => {
@@ -1032,6 +1087,7 @@ function layoutDay(items) {
   if (cluster.length) flush();
   return out;
 }
+const blockX = (left, width) => `left:calc(${left * 100}% + 3px);width:calc(${width * 100}% - 6px);right:auto`;
 function timeGrid(days) {
   const T = todayStr();
   const cols = `56px repeat(${days.length}, minmax(0, 1fr))`;
@@ -1041,33 +1097,30 @@ function timeGrid(days) {
   }).join('');
   const hours = Array.from({ length: 24 }, (_, h) => `<div>${h ? hourLabel(h) : ''}</div>`).join('');
   const colsHtml = days.map((ds) => {
-    // Tasks and recurring busy times share lanes so overlaps sit side by side.
-    const items = [
-      ...state.tasks.filter((t) => t.block && t.block.date === ds).map((t) => ({ t, block: t.block })),
-      ...eventsOn(ds).map((ev) => ({ ev, block: ev })),
-      ...busyOn(ds).map((b) => ({ busy: b, block: { start: b.start, dur: b.end - b.start } })),
-    ].sort((a, b) => a.block.start - b.block.start || b.block.dur - a.block.dur);
-    const blocks = layoutDay(items).map(({ t: item, lane, lanes }) => {
+    const blocks = layoutDay(dayItems(ds)).map(({ t: item, lane, lanes, left, width }) => {
       const { start, dur } = item.block;
-      const pos = `top:calc(var(--hour) * ${start / 60});height:calc(var(--hour) * ${dur / 60} - 2px);left:calc(${(lane / lanes) * 100}% + 3px);width:calc(${100 / lanes}% - 6px);right:auto`;
+      const pos = `top:calc(var(--hour) * ${start / 60});height:calc(var(--hour) * ${dur / 60} - 2px);${blockX(left, width)}`;
       const time = dur >= 30 ? `<span>${fmtTime(start)} – ${fmtTime(start + dur)}</span>` : '';
+      // Shared with something else? Add a side handle to change this item's width.
+      const handle = lanes > 1 ? `<span class="wresize ${lane === lanes - 1 ? 'on-left' : 'on-right'}" data-wresize="${item.key}" title="Drag to change width. Double-click to split evenly." aria-hidden="true"></span>` : '';
+      const key = `data-key="${item.key}"`;
       if (item.busy) {
-        return `<div class="block busy" data-action="edit-busy" data-id="${item.busy.id}" style="${pos}" title="${esc(item.busy.title)}"><b>${esc(item.busy.title)}</b>${time}</div>`;
+        return `<div class="block busy" ${key} data-action="edit-busy" data-id="${item.busy.id}" style="${pos}" title="${esc(item.busy.title)}"><b>${esc(item.busy.title)}</b>${time}${handle}</div>`;
       }
       if (item.ev) {
         const ev = item.ev, series = ev.seriesId;
         return series
-          ? `<div class="block event" data-action="edit-event" data-id="${series}" data-date="${ev.date}"
-              style="--bc:${eventColor(ev)};${pos}" title="${esc(ev.title)} (repeats ${EVENT_REPEAT[ev.repeat].toLowerCase()})"><b>↻ ${esc(ev.title)}</b>${time}</div>`
-          : `<div class="block event" draggable="true" data-drag="e:${ev.id}" data-action="edit-event" data-id="${ev.id}"
+          ? `<div class="block event" ${key} data-action="edit-event" data-id="${series}" data-date="${ev.date}"
+              style="--bc:${eventColor(ev)};${pos}" title="${esc(ev.title)} (repeats ${EVENT_REPEAT[ev.repeat].toLowerCase()})"><b>↻ ${esc(ev.title)}</b>${time}${handle}</div>`
+          : `<div class="block event" ${key} draggable="true" data-drag="e:${ev.id}" data-action="edit-event" data-id="${ev.id}"
               style="--bc:${eventColor(ev)};${pos}" title="${esc(ev.title)} (event)"><b>${esc(ev.title)}</b>${time}
-              <span class="resize" data-resize="e:${ev.id}" aria-hidden="true"></span></div>`;
+              <span class="resize" data-resize="e:${ev.id}" aria-hidden="true"></span>${handle}</div>`;
       }
       const t = item.t;
-      return `<div class="block task-block ${t.done ? 'done' : ''}" draggable="true" data-drag="t:${t.id}" data-action="edit-task" data-id="${t.id}"
+      return `<div class="block task-block ${t.done ? 'done' : ''}" ${key} draggable="true" data-drag="t:${t.id}" data-action="edit-task" data-id="${t.id}"
         style="--bc:${listColor(t.listId)};${pos}" title="${esc(t.title)} (task)">
         <b><span class="blk-check" role="checkbox" aria-checked="${t.done}" aria-label="Complete ${esc(t.title)}" data-action="toggle-task" data-id="${t.id}">${t.done ? ICONS.check : ''}</span>${esc(t.title)}</b>${time}
-        <span class="resize" data-resize="t:${t.id}" aria-hidden="true"></span></div>`;
+        <span class="resize" data-resize="t:${t.id}" aria-hidden="true"></span>${handle}</div>`;
     }).join('');
     const nowLine = ds === T ? `<div class="now-line" style="top:calc(var(--hour) * ${nowMinutes() / 60})"></div>` : '';
     return `<div class="day-col ${ds === T ? 'is-today' : ''}" data-day="${ds}" data-action="slot" style="height:calc(var(--hour) * 24)">${blocks}${nowLine}</div>`;
@@ -2521,7 +2574,7 @@ function dropMinutes(col, e) {
 }
 
 document.addEventListener('dragstart', (e) => {
-  if (resize) { e.preventDefault(); return; }
+  if (resize || widthDrag || e.target.closest?.('[data-wresize]')) { e.preventDefault(); return; }
   const order = e.target.closest?.('[data-order]');
   if (order) { drag = { order: order.dataset.order }; order.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', drag.order); return; }
   const el = e.target.closest?.('[data-drag]');
@@ -2602,6 +2655,73 @@ document.addEventListener('drop', (e) => {
 });
 
 document.addEventListener('dragend', () => { drag = null; clearDropMarks(); $$('.dragging').forEach((x) => x.classList.remove('dragging')); });
+
+/* ---------- Changing a block's width ----------
+   The dragged edge follows the pointer: with P = weight of lanes before, A = after and W = this
+   lane, the right edge sits at (P+W)/(P+W+A), so W = (r(P+A) - P) / (1 - r). The last lane has
+   its handle on the left edge instead, at P/(P+W), so W = P(1-l)/l. */
+let widthDrag = null;
+function laneInfo(ds, key) {
+  const layout = layoutDay(dayItems(ds));
+  const me = layout.find((x) => x.t.key === key);
+  if (!me) return null;
+  const sameCluster = layout.filter((x) => x.cluster === me.cluster);
+  const laneW = [];
+  sameCluster.forEach((x) => { laneW[x.lane] = Math.max(laneW[x.lane] || 0, weightOf(x.t.key)); });
+  const P = laneW.slice(0, me.lane).reduce((a, b) => a + (b || 0), 0), A = laneW.slice(me.lane + 1).reduce((a, b) => a + (b || 0), 0);
+  return { me, sameCluster, laneKeys: sameCluster.filter((x) => x.lane === me.lane).map((x) => x.t.key), P, A, last: me.lane === me.lanes - 1 };
+}
+function restyleColumn(col) {
+  layoutDay(dayItems(col.dataset.day)).forEach(({ t, left, width }) => {
+    const el = col.querySelector(`[data-key="${CSS.escape(t.key)}"]`);
+    if (el) { el.style.left = `calc(${left * 100}% + 3px)`; el.style.width = `calc(${width * 100}% - 6px)`; }
+  });
+}
+document.addEventListener('pointerdown', (e) => {
+  const h = e.target.closest?.('[data-wresize]');
+  if (!h || ui.locked) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const col = h.closest('.day-col');
+  widthDrag = { key: h.dataset.wresize, col, ds: col.dataset.day, undo: snapshot(), moved: false };
+  h.setPointerCapture(e.pointerId);
+  h.closest('.block').classList.add('resizing');
+}, true);
+document.addEventListener('pointermove', (e) => {
+  if (!widthDrag) return;
+  const info = laneInfo(widthDrag.ds, widthDrag.key);
+  if (!info) return;
+  const r = widthDrag.col.getBoundingClientRect();
+  const x = clamp((e.clientX - r.left) / r.width, 0.06, 0.94);
+  let W = info.last ? (info.P * (1 - x)) / x : (x * (info.P + info.A) - info.P) / (1 - x);
+  W = clamp(W, 0.2, 8);
+  info.laneKeys.forEach((k) => setWeight(k, W));
+  widthDrag.moved = true;
+  restyleColumn(widthDrag.col);
+});
+function endWidthDrag() {
+  if (!widthDrag) return;
+  const { moved, undo, col } = widthDrag;
+  widthDrag = null;
+  ui.skipClick = true;
+  setTimeout(() => { ui.skipClick = false; }, 0);
+  col.querySelectorAll('.resizing').forEach((el) => el.classList.remove('resizing'));
+  if (!moved) return; // a plain click (or the first half of a double-click) changes nothing
+  save(); render();
+  toast('Width changed. Double-click the edge to split evenly.', undo);
+}
+document.addEventListener('pointerup', endWidthDrag);
+document.addEventListener('pointercancel', endWidthDrag);
+document.addEventListener('dblclick', (e) => {
+  const h = e.target.closest?.('[data-wresize]');
+  if (!h) return;
+  const ds = h.closest('.day-col').dataset.day, info = laneInfo(ds, h.dataset.wresize);
+  if (!info) return;
+  const undo = snapshot();
+  info.sameCluster.forEach((x) => setWeight(x.t.key, null));
+  save(); render();
+  toast('Split evenly', undo);
+});
 
 /* ---------- Resizing calendar blocks ---------- */
 let resize = null;

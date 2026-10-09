@@ -28,6 +28,7 @@ The default passcode is **1234**. You can change it in Settings → Security.
   - **Next free slot** (⚡) finds the first gap that fits, within your day hours and around your busy times.
   - The Schedule dialog has quick picks (In 1 hour, This afternoon, Tonight, Tomorrow) and **Pick on calendar**, which works on phones.
   - Drag a block's bottom edge to resize it.
+  - When blocks overlap, they split the width evenly (any number at once). Drag a block's side edge to give it more or less of the width, and double-click the edge to split evenly again.
   - A block's Move options are +1 hour, Later today, Next day and Next free slot.
   - **Not finished yet** on Today reschedules missed blocks in one tap.
   - Every automatic change can be undone from its notification.
