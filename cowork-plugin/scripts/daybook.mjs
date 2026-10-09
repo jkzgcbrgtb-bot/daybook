@@ -171,7 +171,7 @@ class Vault {
 }
 function normalize(s) {
   s.settings = { dayStart: '08:00', dayEnd: '22:00', ...(s.settings || {}) };
-  for (const k of ['lists', 'tasks', 'notes', 'habits', 'goals', 'busy', 'pomodoros', 'events']) if (!Array.isArray(s[k])) s[k] = [];
+  for (const k of ['lists', 'tasks', 'notes', 'habits', 'goals', 'busy', 'pomodoros', 'events', 'tests', 'grades']) if (!Array.isArray(s[k])) s[k] = [];
   if (!s.lists.length) s.lists.push({ id: 'l-inbox', name: 'Inbox', color: 1 });
   s.focus = s.focus || {};
   s.tasks.forEach((t) => { t.subtasks = t.subtasks || []; t.repeat = t.repeat || 'none'; t.priority = t.priority || 'none'; });
@@ -231,12 +231,29 @@ function taskSort(a, b) {
   return PRIO_RANK[a.priority] - PRIO_RANK[b.priority];
 }
 
+/* ---------- repeating events (mirrors app.js) ---------- */
+const isRepeating = (ev) => ev.repeat && ev.repeat !== 'none';
+function occursOn(ev, ds) {
+  if (!isRepeating(ev)) return ev.date === ds;
+  if (ds < ev.date || (ev.until && ds > ev.until) || (ev.skip || []).includes(ds)) return false;
+  const wd = weekday(ds), first = weekday(ev.date);
+  switch (ev.repeat) {
+    case 'daily': return true;
+    case 'weekdays': return wd >= 1 && wd <= 5;
+    case 'weekly': return wd === first;
+    case 'biweekly': return wd === first && Math.round((utc(ds) - utc(ev.date)) / 86400000 / 7) % 2 === 0;
+    case 'monthly': return utc(ds).getUTCDate() === utc(ev.date).getUTCDate();
+    default: return false;
+  }
+}
+const eventsOn = (s, ds) => s.events.filter((e) => occursOn(e, ds)).map((e) => ({ ...e, date: ds })).sort((a, b) => a.start - b.start);
+
 /* ---------- scheduling (mirrors app.js) ---------- */
 const busyOn = (s, ds) => s.busy.filter((b) => b.days.includes(weekday(ds)));
 function occupied(s, ds, excludeId) {
   return [
     ...s.tasks.filter((t) => t.block && t.block.date === ds && t.id !== excludeId).map((t) => ({ start: t.block.start, end: t.block.start + t.block.dur })),
-    ...s.events.filter((e) => e.date === ds && e.id !== excludeId).map((e) => ({ start: e.start, end: e.start + e.dur })),
+    ...eventsOn(s, ds).filter((e) => e.id !== excludeId).map((e) => ({ start: e.start, end: e.start + e.dur })),
     ...busyOn(s, ds).map((b) => ({ start: b.start, end: b.end })),
   ].sort((a, b) => a.start - b.start);
 }
@@ -364,7 +381,13 @@ function applyTaskFields(s, t, args) {
 
 /* ---------- events: calendar-only items, never checked off, not in task lists ---------- */
 function eventView(s, e) {
-  return { id: e.id, title: e.title, date: e.date, weekday: WEEKDAYS[weekday(e.date)], start: toHHMM(e.start), end: toHHMM(e.start + e.dur), color_list: listName(s, e.listId), ...(e.notes ? { notes: e.notes } : {}) };
+  return { id: e.id, title: e.title, date: e.date, weekday: WEEKDAYS[weekday(e.date)], start: toHHMM(e.start), end: toHHMM(e.start + e.dur), color_list: listName(s, e.listId),
+    ...(isRepeating(e) ? { repeats: e.repeat, ...(e.until ? { until: e.until } : {}) } : {}), ...(e.notes ? { notes: e.notes } : {}) };
+}
+function testView(s, t) {
+  const sessions = s.tasks.filter((x) => x.testId === t.id);
+  return { id: t.id, title: t.title, class: listName(s, t.listId), date: t.date, time: t.time || '08:00', days_away: Math.round((utc(t.date) - utc(today())) / 86400000),
+    covers: t.topics, study_sessions: `${sessions.filter((x) => x.done).length}/${sessions.length} done` };
 }
 function applyEventFields(s, ev, args) {
   if (typeof args.title === 'string') ev.title = args.title.trim();
@@ -375,6 +398,11 @@ function applyEventFields(s, ev, args) {
   else if (!ev.dur) ev.dur = 60;
   if (!(ev.dur > 0)) fail('The event has to end after it starts');
   if (args.list) ev.listId = args.list === 'none' ? null : listByName(s, args.list).id;
+  if (args.repeat) {
+    if (!['none', 'daily', 'weekdays', 'weekly', 'biweekly', 'monthly'].includes(args.repeat)) fail('Event repeat must be none, daily, weekdays, weekly, biweekly or monthly');
+    ev.repeat = args.repeat;
+  }
+  if (args.until) ev.until = args.until === 'none' ? '' : checkDate(args.until);
   const notes = text(args, 'notes');
   if (typeof notes === 'string') ev.notes = notes;
   if (!ev.title) fail('An event needs a title');
@@ -398,7 +426,7 @@ const COMMANDS = {
     const T = args.date && args.date !== true ? checkDate(args.date) : today();
     const schedule = [
       ...s.tasks.filter((t) => t.block?.date === T).map((t) => ({ start: toHHMM(t.block.start), end: toHHMM(t.block.start + t.block.dur), title: t.title, task_id: t.id, done: t.done })),
-      ...s.events.filter((e) => e.date === T).map((e) => ({ start: toHHMM(e.start), end: toHHMM(e.start + e.dur), title: e.title, event_id: e.id })),
+      ...eventsOn(s, T).map((e) => ({ start: toHHMM(e.start), end: toHHMM(e.start + e.dur), title: e.title, event_id: e.id, ...(isRepeating(e) ? { repeats: e.repeat } : {}) })),
       ...busyOn(s, T).map((b) => ({ start: toHHMM(b.start), end: toHHMM(b.end), title: b.title, busy: true })),
     ].sort((a, b) => (a.start < b.start ? -1 : 1));
     const open = s.tasks.filter((t) => !t.done);
@@ -413,6 +441,7 @@ const COMMANDS = {
       habits_due_today: s.habits.filter(dueToday).map((h) => habitView(s, h)),
       habits_resting_today: s.habits.filter((h) => !dueToday(h)).map((h) => h.name),
       goals: s.goals.map((g) => ({ id: g.id, title: g.title, current: g.current, target: g.target, unit: g.unit })),
+      upcoming_tests: s.tests.filter((t) => t.date >= T && t.date <= addDays(T, 14)).sort((a, b) => (a.date < b.date ? -1 : 1)).map((t) => testView(s, t)),
       open_tasks: open.length, unscheduled_open_tasks: open.filter((t) => !t.block).length,
     };
   },
@@ -499,7 +528,9 @@ const COMMANDS = {
   async events(args, v) {
     const { state: s } = await v.read();
     const from = args.from ? checkDate(args.from) : today(), to = args.to ? checkDate(args.to) : addDays(from, 13);
-    return s.events.filter((e) => e.date >= from && e.date <= to).sort((a, b) => (a.date + toHHMM(a.start) < b.date + toHHMM(b.start) ? -1 : 1)).map((e) => eventView(s, e));
+    const out = [];
+    for (let ds = from; ds <= to; ds = addDays(ds, 1)) out.push(...eventsOn(s, ds).map((e) => eventView(s, e)));
+    return out;
   },
 
   async 'add-event'(args, v) {
@@ -529,6 +560,22 @@ const COMMANDS = {
       const ev = byId(s.events, id, 'event');
       s.events = s.events.filter((x) => x !== ev);
       return { deleted: ev.title };
+    });
+  },
+
+  async classes(args, v) {
+    const { state: s } = await v.read();
+    const T = today();
+    return s.lists.filter((l) => l.kind === 'subject' || l.kind === 'school').map((l) => {
+      const gs = s.grades.filter((g) => g.listId === l.id && g.outOf > 0);
+      const pct = gs.length ? (gs.reduce((a, g) => a + g.score, 0) / gs.reduce((a, g) => a + g.outOf, 0)) * 100 : null;
+      return {
+        class: l.name,
+        average: pct == null ? null : `${pct.toFixed(1)}%`,
+        grades: gs.map((g) => ({ title: g.title, score: `${g.score}/${g.outOf}`, date: g.date })),
+        upcoming_tests: s.tests.filter((t) => t.listId === l.id && t.date >= T).sort((a, b) => (a.date < b.date ? -1 : 1)).map((t) => testView(s, t)),
+        assignments_due: s.tasks.filter((t) => t.listId === l.id && !t.done && !t.testId).sort(taskSort).map((t) => taskView(s, t)),
+      };
     });
   },
 
@@ -682,7 +729,7 @@ const HELP = `Daybook tool. Commands (all print JSON):
   free-slots [--date D] [--minutes N] [--count N]
   delete-task <id>
   events [--from D] [--to D]              Calendar events (appointments, matches…), next 2 weeks by default
-  add-event --title T --date D --time HH:MM (--end HH:MM | --minutes N) [--list L] [--notes T]
+  add-event --title T --date D --time HH:MM (--end HH:MM | --minutes N) [--list L] [--notes T] [--repeat weekly --until D]
   update-event <id> [same fields]  |  delete-event <id>
   notes [--search Q] [--list L]  |  note <id>
   add-note --title T (--body T | --body-file F) [--list L]
@@ -694,6 +741,7 @@ const HELP = `Daybook tool. Commands (all print JSON):
   goals  |  update-goal <id> (--add N | --set N)
   lists                                  Lists, busy times, day hours, time zone
   completed [--since D]
+  classes                                Each class: average, grades, upcoming tests (what they cover, study progress), assignments due
 Dates are YYYY-MM-DD, times are 24-hour HH:MM in the Daybook owner's time zone.`;
 
 async function main() {
