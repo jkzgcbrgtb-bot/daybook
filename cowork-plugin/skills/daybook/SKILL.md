@@ -1,6 +1,6 @@
 ---
 name: daybook
-description: Reads and updates the user's Daybook planner (tasks, time-blocked calendar, notes, habits, goals, focus line). Use when the user mentions Daybook, their tasks, to-dos, homework, what's due, their schedule or calendar, habits, or asks to add, move, schedule, check off, or look up something in their planner, for example "add bio lab due Thursday", "what's due this week?", "find me an hour for my essay", "check off reading", or "what's on today?".
+description: Reads and updates the user's Daybook planner (tasks, time-blocked calendar, events, classes and tests, notes, habits, focus line). Use when the user mentions Daybook, their tasks, to-dos, homework, what's due, their schedule or calendar, habits, or asks to add, move, schedule, check off, or look up something in their planner, for example "add bio lab due Thursday", "what's due this week?", "find me an hour for my essay", "check off reading", or "what's on today?".
 ---
 
 # Daybook
@@ -50,7 +50,6 @@ When the user says something *happens* at a time, add an event. When it's someth
 | Notes | `notes --search biology` · `note <id>` · `add-note --title "…" --body-file draft.md --list School` · `update-note <id> --append "…"` |
 | Habits | `habits` · `check-habit "read"` · `check-habit "read" --undo` |
 | Focus line | `focus` (read) · `focus Finish the bio lab` (set) |
-| Goals | `goals` · `update-goal <id> --add 1` |
 | Lists, class times, day hours | `lists` |
 | Recently finished | `completed --since 2026-09-20` |
 
@@ -66,7 +65,7 @@ For long text (notes, drafts), write it to a file first and pass `--body-file`, 
 - **Habits:** a habit runs on specific days (`schedule` like "Mon, Wed, Fri") or a number of times per week. `summary` lists only the habits due today. Streaks skip rest days. Ticking a habit on a rest day counts as a bonus and never breaks anything.
 - **Classes and tests:** `classes` shows each class's average, grades, upcoming tests (with what they cover and study progress) and assignments due. `summary` lists tests in the next 2 weeks. Tests, study plans and grades are added in the app; study sessions are ordinary tasks. Events can repeat (`--repeat weekly --until 2026-12-18`).
 - **Estimates:** when the user says how long something takes, pass `--estimate` in minutes. Scheduling uses it as the block length.
-- **Adding and editing** tasks, notes, schedule blocks, habits and the focus line is allowed without asking first, but only for what the user asked for or what the work-ahead skill calls for.
+- **Adding and editing** tasks, events, notes, schedule blocks, habits and the focus line is allowed without asking first, but only for what the user asked for or what the work-ahead skill calls for.
 - **Deleting** (`delete-task`, `delete-event`, `delete-note`) always needs the user's explicit OK in this conversation first. Say exactly what will be deleted.
 - **Checking off tasks:** only mark a task done when the user says it's done. Never mark a task done because you drafted work for it; use the work-ahead flow instead.
 - **Afterward,** confirm what changed in one or two short lines, with dates written naturally ("Thursday Oct 1 at 4 PM"), and don't show ids.

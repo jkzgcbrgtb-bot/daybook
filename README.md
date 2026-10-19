@@ -15,12 +15,14 @@ The default passcode is **1234**. You can change it in Settings → Security.
 ## Features
 
 - **Lock screen**: the app stays blurred behind a passcode keypad. A wrong code shakes the dots and shows an error, and 5 misses trigger a 30-second cooldown. You can lock from the sidebar, the mobile top bar, or Settings.
-- **Today**: focus line, a focus timer (25-minute focus sessions with 5- and 15-minute breaks, optionally linked to a task), today's time blocks (the current one is highlighted), due and overdue tasks with subtasks, quick add, habit check-offs, and goal progress bars.
+- **Today**: focus line, a focus timer (25-minute focus sessions with 5- and 15-minute breaks, optionally linked to a task), today's time blocks (the current one is highlighted), due and overdue tasks with subtasks, quick add, and habit check-offs.
 - **Calendar**: day, week and month views. Drag an unscheduled task onto the grid to time-block it, or press **Schedule** on touch devices. Drag blocks to move them, or drop one back on the tray to unschedule it. Click a block to edit it, or an empty slot to create a task.
 - **Tasks vs. events**:
   - **Tasks** live in lists, can be time-blocked, and get checked off. Scheduled tasks have a check circle right on their calendar block.
   - **Events** are added by clicking an empty time or with **New event** (for example a match, an appointment or a party). They only sit on the calendar: no checkbox, never crossed off, not in task lists.
   - Events can repeat (every day, weekday, week, 2 weeks or month), optionally until a date, and single dates can be skipped.
+  - **One-day changes:** dragging, resizing or editing one School block or one occurrence of a repeating event changes that date only ("Just Thu, Oct 22" is the default). Choose "Every week" or "Every time" to change them all.
+  - **Copy and paste:** use Copy on an event, busy block or scheduled task, then click any time to paste copies (Esc when done). ⌘C and ⌘V work on the block or spot under the pointer.
   - Both block time for Next free slot and Plan my day, and either can be turned into the other.
 - **Scheduling helpers**:
   - Quick add understands plain English, like `essay fri 3pm 2h #school !high every week`, and shows a preview as you type.
@@ -45,7 +47,7 @@ The default passcode is **1234**. You can change it in Settings → Security.
   - Each habit runs on specific days (Mon/Wed/Fri) or a number of times per week, has a list color and a reminder time, and can be added from one-tap templates (Lift, Tennis practice, Golf range, Latin vocab review and more).
   - Streaks skip rest days. For "× a week" habits they count weeks in a row with the goal met, and each habit shows its best streak.
   - Today shows only the habits due today, grouped Morning, Afternoon, Evening or Anytime, as large tap targets.
-  - The Habits page also has a 7-day grid (rest days are dashed, and ticking one counts as a bonus), goals, and an auto-saving weekly review.
+  - The Habits page also has a 7-day grid (rest days are dashed, and ticking one counts as a bonus).
 - **Stats**: 14-day completion chart, focus time, hours blocked by list (this week or last 30 days), and a 30-day habit consistency heatmap.
 - **Settings**: theme, density, five accent colors, dashboard section order and visibility, nav item visibility, passcode change, lists, and JSON export, import and reset.
 

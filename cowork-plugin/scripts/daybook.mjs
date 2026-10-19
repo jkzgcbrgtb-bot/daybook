@@ -249,7 +249,12 @@ function occursOn(ev, ds) {
 const eventsOn = (s, ds) => s.events.filter((e) => occursOn(e, ds)).map((e) => ({ ...e, date: ds })).sort((a, b) => a.start - b.start);
 
 /* ---------- scheduling (mirrors app.js) ---------- */
-const busyOn = (s, ds) => s.busy.filter((b) => b.days.includes(weekday(ds)));
+// Weekly busy times, with one-day changes from b.overrides[date] (mirrors app.js).
+const busyOn = (s, ds) => s.busy.flatMap((b) => {
+  const ov = b.overrides?.[ds];
+  if (ov?.skip || (!b.days.includes(weekday(ds)) && !ov?.extra)) return [];
+  return [ov ? { ...b, start: ov.start, end: ov.end } : b];
+});
 function occupied(s, ds, excludeId) {
   return [
     ...s.tasks.filter((t) => t.block && t.block.date === ds && t.id !== excludeId).map((t) => ({ start: t.block.start, end: t.block.start + t.block.dur })),
@@ -440,7 +445,6 @@ const COMMANDS = {
       schedule,
       habits_due_today: s.habits.filter(dueToday).map((h) => habitView(s, h)),
       habits_resting_today: s.habits.filter((h) => !dueToday(h)).map((h) => h.name),
-      goals: s.goals.map((g) => ({ id: g.id, title: g.title, current: g.current, target: g.target, unit: g.unit })),
       upcoming_tests: s.tests.filter((t) => t.date >= T && t.date <= addDays(T, 14)).sort((a, b) => (a.date < b.date ? -1 : 1)).map((t) => testView(s, t)),
       open_tasks: open.length, unscheduled_open_tasks: open.filter((t) => !t.block).length,
     };
@@ -684,21 +688,6 @@ const COMMANDS = {
     return v.mutate((s) => { s.focus[d] = words; return { date: d, focus: words }; });
   },
 
-  async goals(args, v) {
-    const { state: s } = await v.read();
-    return s.goals.map((g) => ({ id: g.id, title: g.title, current: g.current, target: g.target, unit: g.unit, percent: Math.round((g.current / g.target) * 100) }));
-  },
-
-  async 'update-goal'(args, v) {
-    const id = args._[1] || fail('Usage: update-goal <id> (--add N | --set N)');
-    return v.mutate((s) => {
-      const g = byId(s.goals, id, 'goal');
-      if (args.set !== undefined) g.current = Math.max(0, Number(args.set));
-      if (args.add !== undefined) g.current = Math.max(0, g.current + Number(args.add));
-      return { goal: g.title, current: g.current, target: g.target };
-    });
-  },
-
   async lists(args, v) {
     const { state: s } = await v.read();
     return {
@@ -738,7 +727,6 @@ const HELP = `Daybook tool. Commands (all print JSON):
   attach-draft <task id> (--body T | --body-file F) [--title T]
   habits  |  check-habit <name> [--date D] [--undo]
   focus [text…] [--date D]
-  goals  |  update-goal <id> (--add N | --set N)
   lists                                  Lists, busy times, day hours, time zone
   completed [--since D]
   classes                                Each class: average, grades, upcoming tests (what they cover, study progress), assignments due
