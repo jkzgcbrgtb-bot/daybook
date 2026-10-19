@@ -19,7 +19,7 @@ const NAV = [
   { id: 'stats', label: 'Stats' },
   { id: 'settings', label: 'Settings', locked: true },
 ];
-const SECTIONS = { focus: 'Focus line', tests: 'Test countdown', timer: 'Focus timer', schedule: 'Schedule', due: 'Due today', habits: 'Habits', goals: 'Goals' };
+const SECTIONS = { focus: 'Focus line', tests: 'Test countdown', timer: 'Focus timer', schedule: 'Schedule', due: 'Due today', habits: 'Habits' };
 const ACCENTS = { indigo: '#4f46e5', teal: '#0d8f86', rose: '#d6285a', amber: '#c26a00', green: '#178a3e' };
 const PRIORITY = { none: 'None', low: 'Low', med: 'Medium', high: 'High' };
 const PRIO_RANK = { high: 0, med: 1, low: 2, none: 3 };
@@ -219,7 +219,7 @@ const ui = {
   taskF: { q: '', list: 'all', prio: 'all', due: 'all', status: 'open' },
   noteQ: '', noteList: 'all', activeNote: null,
   hoursRange: 'week',
-  placing: null, skipClick: false, showKey: false,
+  placing: null, clip: null, skipClick: false, showKey: false,
   planDate: todayStr(), planExclude: new Set(), split: null,
   reminded: {},
   timer: { mode: 'focus', left: TIMER_MODES.focus[1] * 60, running: false, endAt: 0, taskId: '' },
@@ -229,7 +229,6 @@ const ui = {
 const taskById = (id) => state.tasks.find((t) => t.id === id);
 const listById = (id) => state.lists.find((l) => l.id === id);
 const habitById = (id) => state.habits.find((h) => h.id === id);
-const goalById = (id) => state.goals.find((g) => g.id === id);
 const listColor = (id) => { const l = listById(id); return l ? `var(--c${l.color})` : 'var(--c0)'; };
 const doneOn = (t, ds) => t.done && t.doneAt && ymd(new Date(t.doneAt)) === ds;
 
@@ -370,7 +369,16 @@ function spawnNext(t) {
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const taskDur = (t) => t.block?.dur || t.est || 60;
 const fmtDur = (m) => (m < 60 ? `${m} min` : m % 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m / 60} h`);
-const busyOn = (ds) => { const wd = parse(ds).getDay(); return state.busy.filter((b) => b.days.includes(wd)); };
+// A busy time repeats weekly; b.overrides[date] changes one day only: {start, end} moves it,
+// {skip: true} removes it that day, and {extra: true} adds it on a day it doesn't normally run.
+function busyOn(ds) {
+  const wd = parse(ds).getDay();
+  return state.busy.flatMap((b) => {
+    const ov = b.overrides?.[ds];
+    if (ov?.skip || (!b.days.includes(wd) && !ov?.extra)) return [];
+    return [ov ? { ...b, start: ov.start, end: ov.end, date: ds, changed: true } : { ...b, date: ds }];
+  });
+}
 /* Events are things placed straight on the calendar (a match, an appointment): they block time
    but have no checkbox, never get crossed off, and never appear in task lists. */
 const eventById = (id) => state.events.find((e) => e.id === id);
@@ -396,14 +404,36 @@ const eventsOn = (ds) => state.events.filter((e) => occursOn(e, ds))
 const eventColor = (ev) => (ev.listId && listById(ev.listId) ? `var(--c${listById(ev.listId).color})` : 'var(--accent)');
 // Calendar items are keyed "t:<id>" for tasks and "e:<id>" for events, so drag and resize handle both.
 function calItem(key) {
-  const [kind, id] = [key.slice(0, 1), key.slice(2)];
+  const kind = key[0], [id, occDate] = key.slice(2).split('@');
   if (kind === 'e') { const ev = eventById(id); return ev && { kind, obj: ev, title: ev.title, block: ev }; }
+  if (kind === 'r') {
+    const ev = eventById(id), occ = ev && eventsOn(occDate).find((x) => x.seriesId === id);
+    return occ && { kind, obj: ev, title: ev.title, occDate, block: { date: occDate, start: occ.start, dur: occ.dur } };
+  }
+  if (kind === 'b') {
+    const b = state.busy.find((x) => x.id === id), occ = b && busyOn(occDate).find((x) => x.id === id);
+    return occ && { kind, obj: b, title: b.title, occDate, block: { date: occDate, start: occ.start, dur: occ.end - occ.start } };
+  }
   const t = taskById(id);
   return t && { kind, obj: t, title: t.title, block: t.block };
 }
+// Moving or resizing one occurrence of something that repeats changes that date only:
+// a repeating event's date becomes its own one-off event; a busy day gets an override.
 function placeItem(item, date, start, dur) {
   if (item.kind === 'e') Object.assign(item.obj, { date, start, dur });
-  else item.obj.block = { date, start, dur };
+  else if (item.kind === 'r') {
+    const ev = item.obj;
+    ev.skip = [...new Set([...(ev.skip || []), item.occDate])];
+    state.events.push({ id: uid(), title: ev.title, listId: ev.listId || null, notes: ev.notes || '', date, start, dur, createdAt: Date.now(), fromSeries: ev.id });
+  } else if (item.kind === 'b') {
+    const b = item.obj;
+    b.overrides = b.overrides || {};
+    if (date === item.occDate) b.overrides[date] = { start, end: start + dur };
+    else {
+      b.overrides[item.occDate] = { skip: true };
+      b.overrides[date] = { start, end: start + dur, extra: true };
+    }
+  } else item.obj.block = { date, start, dur };
 }
 // `extra` holds blocks being planned but not saved yet ({date, start, dur}).
 function occupied(ds, excludeId, extra = []) {
@@ -474,6 +504,45 @@ function ratioHint(listId) {
   const scope = own.length >= 3 ? `${name} tasks` : 'tasks';
   return `Your ${scope} usually take ${r > 1 ? `${r.toFixed(1)}× your estimate` : `about ${Math.round(r * 100)}% of your estimate`}.`;
 }
+
+/* ---------- Copy and paste on the calendar ----------
+   Copy an event, a busy block or a scheduled task (Copy button, or ⌘C while hovering it), then
+   click any time on the calendar to paste a copy there; keep clicking for more, Esc to stop.
+   ⌘V pastes at the time under the pointer. A copy is always a one-off. */
+function copyItem(key) {
+  const item = calItem(key);
+  if (!item?.block) return;
+  ui.clip = item.kind === 't'
+    ? { type: 'task', taskId: item.obj.id, title: item.title, start: item.block.start, dur: item.block.dur }
+    : { type: 'event', title: item.title, start: item.block.start, dur: item.block.dur, listId: item.obj.listId || null, notes: item.obj.notes || '' };
+  closeModal();
+  if (currentView() !== 'calendar') location.hash = 'calendar'; else render();
+  toast(`Copied “${item.title}”. Click a time to paste it.`);
+}
+function pasteAt(date, start) {
+  const c = ui.clip;
+  if (!c) return;
+  start = clamp(start, 0, 1440 - c.dur);
+  const undo = snapshot();
+  if (c.type === 'task') {
+    const src = taskById(c.taskId);
+    if (!src) { ui.clip = null; render(); return; }
+    state.tasks.push({ ...src, id: uid(), done: false, doneAt: null, nextId: null, createdAt: Date.now(), due: date,
+      subtasks: src.subtasks.map((x) => ({ ...x, id: uid(), done: false })), block: { date, start, dur: c.dur }, parentId: undefined, subId: undefined, testId: undefined });
+  } else {
+    state.events.push({ id: uid(), title: c.title, listId: c.listId, notes: c.notes, date, start, dur: c.dur, createdAt: Date.now() });
+  }
+  save(); render();
+  toast(`Pasted “${c.title}” ${slotLabel({ date, start })}`, undo);
+}
+// What the pointer is over on the calendar, for ⌘C / ⌘V.
+const hover = { key: null, col: null, y: 0 };
+document.addEventListener('mousemove', (e) => {
+  hover.key = e.target.closest?.('[data-drag]')?.dataset.drag || null;
+  hover.col = e.target.closest?.('.day-col') || null;
+  hover.y = e.clientY;
+}, { passive: true });
+const minutesAt = (col, y) => { const r = col.getBoundingClientRect(); return Math.floor((((y - r.top) / (r.height / 24)) * 60) / 15) * 15; };
 
 /* ---------- Plan my day ---------- */
 function planScore(t, ds) {
@@ -861,10 +930,6 @@ const listOptions = (sel, extra = '') => {
   return extra + other.map(opt).join('') + (school.length ? `<optgroup label="School">${school.map(opt).join('')}</optgroup>` : '');
 };
 const pageHead = (title, sub = '', right = '') => `<div class="page-head"><div><h1>${title}</h1>${sub ? `<div class="sub">${sub}</div>` : ''}</div><div class="row wrap">${right}</div></div>`;
-const goalBar = (g) => {
-  const pct = g.target ? clamp(Math.round((g.current / g.target) * 100), 0, 100) : 0;
-  return `<div class="goal"><div class="row"><b>${esc(g.title)}</b><span class="spacer"></span><span class="muted small">${g.current} / ${g.target} ${esc(g.unit)} · ${pct}%</span></div><div class="bar" data-tip="${pct}% complete"><span style="width:${pct}%"></span></div></div>`;
-};
 
 /* ---------- Today ---------- */
 const TODAY_SECTIONS = {
@@ -967,10 +1032,6 @@ const TODAY_SECTIONS = {
       ${groups.map(([g, hs]) => `<div class="habit-group">${g}</div><div class="stack" style="gap:6px">${hs.map(row).join('')}</div>`).join('') || '<div class="empty">Nothing due today. Enjoy the rest day.</div>'}
       ${resting.length ? `<div class="muted small" style="margin-top:10px">Not today: ${resting.map((h) => esc(h.name) + (habitMode(h) === 'weekly' ? ' (done for the week)' : '')).join(', ')}</div>` : ''}
     </section>`;
-  },
-  goals() {
-    return `<section class="card"><div class="card-head"><h2>Goals</h2><button class="btn sm ghost" data-action="go" data-to="habits">Manage</button></div>
-      ${state.goals.length ? state.goals.map(goalBar).join('') : '<div class="empty">No goals yet.</div>'}</section>`;
   },
 };
 const missedTasks = () => state.tasks.filter((t) => !t.done && t.block && t.block.date < todayStr());
@@ -1105,13 +1166,17 @@ function timeGrid(days) {
       const handle = lanes > 1 ? `<span class="wresize ${lane === lanes - 1 ? 'on-left' : 'on-right'}" data-wresize="${item.key}" title="Drag to change width. Double-click to split evenly." aria-hidden="true"></span>` : '';
       const key = `data-key="${item.key}"`;
       if (item.busy) {
-        return `<div class="block busy" ${key} data-action="edit-busy" data-id="${item.busy.id}" style="${pos}" title="${esc(item.busy.title)}"><b>${esc(item.busy.title)}</b>${time}${handle}</div>`;
+        const bk = `b:${item.busy.id}@${ds}`;
+        return `<div class="block busy ${item.busy.changed ? 'changed' : ''}" ${key} draggable="true" data-drag="${bk}" data-action="edit-busy" data-id="${item.busy.id}" data-date="${ds}" style="${pos}"
+          title="${esc(item.busy.title)}${item.busy.changed ? ' (changed for this day only)' : ''}"><b>${esc(item.busy.title)}${item.busy.changed ? ' <span class="once">this day</span>' : ''}</b>${time}
+          <span class="resize" data-resize="${bk}" aria-hidden="true"></span>${handle}</div>`;
       }
       if (item.ev) {
         const ev = item.ev, series = ev.seriesId;
         return series
-          ? `<div class="block event" ${key} data-action="edit-event" data-id="${series}" data-date="${ev.date}"
-              style="--bc:${eventColor(ev)};${pos}" title="${esc(ev.title)} (repeats ${EVENT_REPEAT[ev.repeat].toLowerCase()})"><b>↻ ${esc(ev.title)}</b>${time}${handle}</div>`
+          ? `<div class="block event" ${key} draggable="true" data-drag="r:${series}@${ev.date}" data-action="edit-event" data-id="${series}" data-date="${ev.date}"
+              style="--bc:${eventColor(ev)};${pos}" title="${esc(ev.title)} (repeats ${EVENT_REPEAT[ev.repeat].toLowerCase()}; moving it changes this date only)"><b>↻ ${esc(ev.title)}</b>${time}
+              <span class="resize" data-resize="r:${series}@${ev.date}" aria-hidden="true"></span>${handle}</div>`
           : `<div class="block event" ${key} draggable="true" data-drag="e:${ev.id}" data-action="edit-event" data-id="${ev.id}"
               style="--bc:${eventColor(ev)};${pos}" title="${esc(ev.title)} (event)"><b>${esc(ev.title)}</b>${time}
               <span class="resize" data-resize="e:${ev.id}" aria-hidden="true"></span>${handle}</div>`;
@@ -1175,11 +1240,12 @@ function viewCalendar() {
     <button class="btn icon" data-action="cal-step" data-dir="1" aria-label="Next">${ICONS.right}</button>
     <div class="seg">${seg}</div>`;
   const placing = ui.placing && taskById(ui.placing);
-  const banner = placing ? `<div class="place-banner" role="status"><span>Tap a time on the calendar for <b>${esc(placing.title)}</b> (${fmtDur(taskDur(placing))})</span>
+  const banner = ui.clip ? `<div class="place-banner" role="status"><span>Click any time to paste <b>${esc(ui.clip.title)}</b> (${fmtDur(ui.clip.dur)}). Keep clicking to paste more.</span>
+    <button class="btn sm" data-action="paste-done">Done</button></div>` : placing ? `<div class="place-banner" role="status"><span>Tap a time on the calendar for <b>${esc(placing.title)}</b> (${fmtDur(taskDur(placing))})</span>
     <button class="btn sm" data-action="place-cancel">Cancel</button></div>` : '';
   const legend = `<div class="legend" aria-label="Color key">${state.lists.map((l) => `<span class="chip"><span class="dot" style="background:var(--c${l.color})"></span>${esc(l.name)}</span>`).join('')}</div>`;
   return pageHead('Calendar', calTitle(), toolbar) + banner + legend +
-    `<div class="cal-layout ${placing ? 'placing' : ''}">${tray}<div>${ui.calView === 'month' ? monthGrid() : timeGrid(calDays())}</div></div>`;
+    `<div class="cal-layout ${placing || ui.clip ? 'placing' : ''}">${tray}<div>${ui.calView === 'month' ? monthGrid() : timeGrid(calDays())}</div></div>`;
 }
 function afterCalendar() {
   const sc = $('#cal-scroll');
@@ -1304,17 +1370,6 @@ function viewHabits() {
     </tr>`;
   }).join('');
 
-  const wk = ymd(startOfWeek(new Date()));
-  const r = state.reviews[wk] || {};
-  const wkStart = startOfWeek(new Date()).getTime();
-  const doneThisWeek = state.tasks.filter((t) => t.done && t.doneAt >= wkStart).length;
-  const blockedMin = state.tasks.filter((t) => t.block && t.block.date >= wk && t.block.date <= ymd(addDays(parse(wk), 6))).reduce((a, t) => a + t.block.dur, 0);
-  const elapsed = Math.round((new Date() - wkStart) / 86400000) + 1;
-  // This week's due check-ins so far: scheduled days up to today, or the weekly goal.
-  const possible = state.habits.reduce((a, h) => a + (habitMode(h) === 'weekly' ? h.goal
-    : Array.from({ length: Math.min(elapsed, 7) }, (_, i) => ymd(addDays(startOfWeek(new Date()), i))).filter((ds) => scheduledOn(h, ds)).length), 0);
-  const hits = state.habits.reduce((a, h) => a + Math.min(weekCount(h), weekTarget(h)), 0);
-  const past = Object.keys(state.reviews).filter((k) => k !== wk).sort().reverse();
   const notify = 'Notification' in window && Notification.permission !== 'granted'
     ? `<button class="btn" data-action="enable-notify">${ICONS.bell} Enable reminder notifications</button>` : '';
 
@@ -1330,31 +1385,6 @@ function viewHabits() {
         <thead><tr><th>Habit</th>${head}<th>Streak</th><th>This week</th><th></th></tr></thead>
         <tbody>${rows || `<tr><td colspan="11" class="empty">No habits yet. Add one to start a streak.</td></tr>`}</tbody>
       </table></div></section>
-      <div class="grid grid-2">
-        <section class="card"><div class="card-head"><h2>Goals</h2><button class="btn sm" data-action="new-goal">${ICONS.plus} Add goal</button></div>
-          ${state.goals.map((g) => `${goalBar(g)}<div class="row" style="margin:-4px 0 14px">
-            <button class="btn sm" data-action="goal-step" data-id="${g.id}" data-delta="-1" aria-label="Decrease">−1</button>
-            <button class="btn sm" data-action="goal-step" data-id="${g.id}" data-delta="1" aria-label="Increase">+1</button>
-            <span class="spacer"></span>
-            <button class="btn icon ghost sm" data-action="edit-goal" data-id="${g.id}" aria-label="Edit">${ICONS.edit}</button>
-            <button class="btn icon ghost sm" data-action="delete-goal" data-id="${g.id}" aria-label="Delete">${ICONS.trash}</button></div>`).join('') || '<div class="empty">No goals yet.</div>'}
-        </section>
-        <section class="card"><div class="card-head"><h2>Weekly review</h2><span class="muted small">Week of ${fmtDate(wk)} · saves automatically</span></div>
-          <div class="row wrap" style="margin-bottom:12px">
-            <span class="chip">${doneThisWeek} tasks done</span><span class="chip">${fmtHours(blockedMin)} blocked</span>
-            <span class="chip">${possible ? Math.round((hits / possible) * 100) : 0}% habit check-ins</span>
-          </div>
-          <div class="stack" style="gap:10px">
-            <label class="field">What went well?<textarea class="input" rows="2" data-review="wins">${esc(r.wins || '')}</textarea></label>
-            <label class="field">What got in the way?<textarea class="input" rows="2" data-review="challenges">${esc(r.challenges || '')}</textarea></label>
-            <label class="field">Focus for next week<textarea class="input" rows="2" data-review="next">${esc(r.next || '')}</textarea></label>
-          </div>
-          ${past.length ? `<div style="margin-top:14px"><div class="muted small" style="margin-bottom:6px">Past reviews</div>${past.map((k) => {
-            const p = state.reviews[k];
-            return `<details style="margin-bottom:6px"><summary>Week of ${fmtDate(k)}</summary><div class="small" style="padding:6px 0 0 14px;white-space:pre-wrap"><b>Went well:</b> ${esc(p.wins || '—')}\n<b>In the way:</b> ${esc(p.challenges || '—')}\n<b>Next:</b> ${esc(p.next || '—')}</div></details>`;
-          }).join('')}</div>` : ''}
-        </section>
-      </div>
     </div>`;
 }
 
@@ -1652,6 +1682,7 @@ function openTaskModal(id, defaults = {}) {
       ${id ? `<button type="button" class="btn danger" data-action="delete-task" data-id="${id}">Delete</button>` : ''}
       ${id && !t.done && !t.parentId && !hasOpenSessions(t) ? `<button type="button" class="btn" data-action="split-task" data-id="${id}">Split into sessions</button>` : ''}
       ${id && t.block && !t.done && !t.parentId && !hasSessions(t) ? `<button type="button" class="btn ghost" data-action="task-to-event" data-id="${id}">Make it an event</button>` : ''}
+      ${id && t.block ? `<button type="button" class="btn ghost" data-action="copy-item" data-key="t:${id}">Copy</button>` : ''}
       <span class="spacer"></span>
       <button type="button" class="btn" data-action="close-modal">Cancel</button>
       <button class="btn primary">Save</button>
@@ -1694,41 +1725,64 @@ function busyDays(days) {
   if (key === '06') return 'Weekends';
   return [1, 2, 3, 4, 5, 6, 0].filter((d) => days.includes(d)).map((d) => WEEKDAYS[d]).join(', ');
 }
-function openBusyModal(id) {
+function openBusyModal(id, occDate = null) {
   const b = id ? state.busy.find((x) => x.id === id) : { title: '', days: [1, 2, 3, 4, 5], start: 480, end: 900 };
   if (!b) return;
-  openModal(`<form data-form="busy" data-id="${id || ''}"><h2>${id ? 'Edit busy time' : 'New busy time'}</h2>
-    <div class="fields">
+  const day = occDate && busyOn(occDate).find((x) => x.id === id);
+  const dayLabel = occDate && fmtDate(occDate, { weekday: 'short', month: 'short', day: 'numeric' });
+  openModal(`<form data-form="busy" data-id="${id || ''}" data-occ="${day ? occDate : ''}"><h2>${id ? `Edit ${esc(b.title)}` : 'New busy time'}</h2>
+    ${day ? `<div class="seg" role="radiogroup" aria-label="Change" style="margin-bottom:14px">
+        <label><input type="radio" name="scope" value="day" checked data-scope> Just ${dayLabel}</label>
+        <label><input type="radio" name="scope" value="all" data-scope> Every week</label></div>
+      <div class="fields" data-scope-panel="day">
+        <label class="field">Starts<input class="input" type="time" step="300" name="dayStart" value="${toHHMM(day.start)}"></label>
+        <label class="field">Ends<input class="input" type="time" step="300" name="dayEnd" value="${toHHMM(day.end)}"></label>
+        <p class="small muted full" style="margin:0">Only ${dayLabel} changes. Other weeks stay ${fmtTime(b.start)} – ${fmtTime(b.end)}.</p>
+      </div>` : ''}
+    <div class="fields ${day ? 'hidden' : ''}" data-scope-panel="all">
       <label class="field full">Name<input class="input" name="title" required value="${esc(b.title)}" placeholder="School, Period 3: Biology, Work…"></label>
       <div class="field full">Days<div class="day-picks">${[1, 2, 3, 4, 5, 6, 0].map((d) => `<label class="day-pick"><input type="checkbox" name="days" value="${d}" ${b.days.includes(d) ? 'checked' : ''}><span>${WEEKDAYS[d]}</span></label>`).join('')}</div></div>
       <label class="field">Starts<input class="input" type="time" step="300" name="start" value="${toHHMM(b.start)}" required></label>
       <label class="field">Ends<input class="input" type="time" step="300" name="end" value="${toHHMM(b.end)}" required></label>
     </div>
     <div class="small" id="busy-msg" style="color:var(--danger);margin-top:8px"></div>
-    <div class="modal-foot">${id ? `<button type="button" class="btn danger" data-action="delete-busy" data-id="${id}">Delete</button>` : ''}<span class="spacer"></span>
+    <div class="modal-foot">
+      ${day ? `<button type="button" class="btn" data-action="busy-skip-day" data-id="${id}" data-date="${occDate}">None on ${dayLabel}</button>` : ''}
+      ${day?.changed ? `<button type="button" class="btn ghost" data-action="busy-reset-day" data-id="${id}" data-date="${occDate}">Back to normal</button>` : ''}
+      ${day ? `<button type="button" class="btn ghost" data-action="copy-item" data-key="b:${id}@${occDate}">Copy</button>` : ''}
+      ${id && !day ? `<button type="button" class="btn danger" data-action="delete-busy" data-id="${id}">Delete</button>` : ''}
+      <span class="spacer"></span>
       <button type="button" class="btn" data-action="close-modal">Cancel</button><button class="btn primary">Save</button></div></form>`);
 }
 function openEventModal(id, defaults = {}, occDate = null) {
   const ev = id ? eventById(id) : { title: '', date: ui.calDate, start: nextSlot(), dur: 60, listId: null, notes: '', repeat: 'none', until: '', ...defaults };
   if (!ev) return;
   const rep = isRepeating(ev);
-  openModal(`<form data-form="event" data-id="${id || ''}"><h2>${id ? 'Edit event' : 'New event'}</h2>
-    <p class="muted small" style="margin:-8px 0 14px">Events sit on your calendar only. They don't appear in task lists and don't get checked off.</p>
+  // Opened from one date of a repeating event: show that date's times, and save to that date only by default.
+  const occ = rep && occDate ? eventsOn(occDate).find((x) => x.seriesId === id) : null;
+  const shown = occ ? { ...ev, date: occDate, start: occ.start, dur: occ.dur } : ev;
+  const occLabel = occ && fmtDate(occDate, { weekday: 'short', month: 'short', day: 'numeric' });
+  openModal(`<form data-form="event" data-id="${id || ''}" data-occ="${occ ? occDate : ''}"><h2>${id ? 'Edit event' : 'New event'}</h2>
+    ${occ ? `<div class="seg" role="radiogroup" aria-label="Change" style="margin:-4px 0 14px">
+        <label><input type="radio" name="scope" value="this" checked data-ev-scope> Just ${occLabel}</label>
+        <label><input type="radio" name="scope" value="all" data-ev-scope> Every time</label></div>`
+      : `<p class="muted small" style="margin:-8px 0 14px">Events sit on your calendar only. They don't appear in task lists and don't get checked off.</p>`}
     <div class="fields">
       <label class="field full">Title<input class="input" name="title" required value="${esc(ev.title)}" placeholder="Tennis match vs Central, dentist, party…" ${id ? '' : 'data-autosort'}></label>
-      <label class="field">Date<input class="input" type="date" name="date" value="${ev.date}" required></label>
+      <label class="field">Date<input class="input" type="date" name="date" value="${shown.date}" required></label>
       <div class="field">Color ${listPickerHtml(ev.listId, { autosort: !id, allowNone: true, label: 'Color', noneLabel: 'Accent color' })}</div>
-      <label class="field">Starts<input class="input" type="time" step="300" name="start" value="${toHHMM(ev.start)}" required></label>
-      <label class="field">Ends<input class="input" type="time" step="300" name="end" value="${toHHMM(Math.min(ev.start + ev.dur, 1439))}" required></label>
-      <label class="field">Repeat<select class="input" name="repeat" data-event-repeat>${Object.entries(EVENT_REPEAT).map(([v, l]) => `<option value="${v}" ${(ev.repeat || 'none') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-      <label class="field ${rep ? '' : 'hidden'}" data-until>Until (optional)<input class="input" type="date" name="until" value="${ev.until || ''}"></label>
+      <label class="field">Starts<input class="input" type="time" step="300" name="start" value="${toHHMM(shown.start)}" required></label>
+      <label class="field">Ends<input class="input" type="time" step="300" name="end" value="${toHHMM(Math.min(shown.start + shown.dur, 1439))}" required></label>
+      <label class="field ${occ ? 'hidden' : ''}" data-repeat-field>Repeat<select class="input" name="repeat" data-event-repeat>${Object.entries(EVENT_REPEAT).map(([v, l]) => `<option value="${v}" ${(ev.repeat || 'none') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="field ${rep && !occ ? '' : 'hidden'}" data-until>Until (optional)<input class="input" type="date" name="until" value="${ev.until || ''}"></label>
       <label class="field full">Notes<textarea class="input" name="notes" rows="2" placeholder="Location, what to bring…">${esc(ev.notes || '')}</textarea></label>
     </div>
-    ${rep && id ? `<p class="small muted" style="margin:10px 0 0">This repeats. Changes here apply to every time it happens${(ev.skip || []).length ? `, and ${ev.skip.length} date${ev.skip.length === 1 ? ' is' : 's are'} skipped` : ''}.</p>` : ''}
+    ${rep && id ? `<p class="small muted" style="margin:10px 0 0" data-scope-note>${occ ? `Only ${occLabel} changes. Every other time stays the same.` : `This repeats. Changes here apply to every time it happens${(ev.skip || []).length ? `, and ${ev.skip.length} date${ev.skip.length === 1 ? ' is' : 's are'} skipped` : ''}.`}</p>` : ''}
     <div class="small" id="event-msg" style="color:var(--danger);margin-top:8px"></div>
     <div class="modal-foot">
       ${id ? `<button type="button" class="btn danger" data-action="delete-event" data-id="${id}">${rep ? 'Delete all' : 'Delete'}</button>` : ''}
-      ${rep && id && occDate ? `<button type="button" class="btn" data-action="skip-occurrence" data-id="${id}" data-date="${occDate}">Skip ${fmtDate(occDate, { weekday: 'short', month: 'short', day: 'numeric' })} only</button>` : ''}
+      ${occ ? `<button type="button" class="btn" data-action="skip-occurrence" data-id="${id}" data-date="${occDate}">Remove ${occLabel} only</button>` : ''}
+      ${id && (!rep || occ) ? `<button type="button" class="btn ghost" data-action="copy-item" data-key="${occ ? `r:${id}@${occDate}` : `e:${id}`}">Copy</button>` : ''}
       ${rep ? '' : `<button type="button" class="btn ghost" data-action="event-to-task" data-id="${id || ''}">Make it a task instead</button>`}
       <span class="spacer"></span>
       <button type="button" class="btn" data-action="close-modal">Cancel</button>
@@ -1817,17 +1871,6 @@ function openHabitModal(id) {
     <div class="small" id="habit-msg" style="color:var(--danger);margin-top:8px"></div>
     <div class="modal-foot"><span class="spacer"></span><button type="button" class="btn" data-action="close-modal">Cancel</button><button class="btn primary">Save</button></div></form>`);
 }
-function openGoalModal(id) {
-  const g = id ? goalById(id) : { title: '', current: 0, target: 10, unit: '' };
-  openModal(`<form data-form="goal" data-id="${id || ''}"><h2>${id ? 'Edit goal' : 'New goal'}</h2>
-    <div class="fields">
-      <label class="field full">Goal<input class="input" name="title" required value="${esc(g.title)}"></label>
-      <label class="field">Progress<input class="input" type="number" min="0" step="any" name="current" value="${g.current}"></label>
-      <label class="field">Target<input class="input" type="number" min="1" step="any" name="target" value="${g.target}" required></label>
-      <label class="field full">Unit<input class="input" name="unit" value="${esc(g.unit)}" placeholder="books, km, sessions…"></label>
-    </div>
-    <div class="modal-foot"><span class="spacer"></span><button type="button" class="btn" data-action="close-modal">Cancel</button><button class="btn primary">Save</button></div></form>`);
-}
 
 const FORMS = {
   task(f) {
@@ -1880,12 +1923,29 @@ const FORMS = {
     if (until && until < d.get('date')) { $('#event-msg').textContent = 'The repeat end date needs to be after the first date.'; return; }
     const fields = { title: d.get('title').trim(), date: d.get('date'), start, dur: end - start, listId: d.get('listId') || null, notes: d.get('notes') || '', repeat, until };
     if (!fields.title) return;
+    if (f.dataset.occ && d.get('scope') === 'this') {
+      // Just this date: drop it from the series and keep the edited version as its own event.
+      const ev = eventById(f.dataset.id);
+      ev.skip = [...new Set([...(ev.skip || []), f.dataset.occ])];
+      state.events.push({ id: uid(), createdAt: Date.now(), fromSeries: ev.id, ...fields, repeat: 'none', until: '' });
+      commit(`Changed ${fmtDate(f.dataset.occ, { weekday: 'long', month: 'short', day: 'numeric' })} only`);
+      return;
+    }
+    if (f.dataset.occ) { fields.date = eventById(f.dataset.id).date; } // "Every time" keeps the series' first date
     if (f.dataset.id) Object.assign(eventById(f.dataset.id), fields);
     else state.events.push({ id: uid(), createdAt: Date.now(), ...fields });
     commit(f.dataset.id ? 'Event saved' : `Event added ${slotLabel(fields)}`);
   },
   busy(f) {
     const d = new FormData(f);
+    if (f.dataset.occ && d.get('scope') === 'day') {
+      const b = state.busy.find((x) => x.id === f.dataset.id), occ = f.dataset.occ;
+      const start = fromHHMM(d.get('dayStart')), end = fromHHMM(d.get('dayEnd'));
+      if (end <= start) { $('#busy-msg').textContent = 'The end time needs to be after the start time.'; return; }
+      b.overrides = { ...(b.overrides || {}), [occ]: { start, end, ...(b.days.includes(parse(occ).getDay()) ? {} : { extra: true }) } };
+      commit(`${b.title} changed for ${fmtDate(occ, { weekday: 'long', month: 'short', day: 'numeric' })} only`);
+      return;
+    }
     const fields = { title: d.get('title').trim(), days: d.getAll('days').map(Number), start: fromHHMM(d.get('start')), end: fromHHMM(d.get('end')) };
     if (!fields.days.length) { $('#busy-msg').textContent = 'Pick at least one day.'; return; }
     if (fields.end <= fields.start) { $('#busy-msg').textContent = 'The end time needs to be after the start time.'; return; }
@@ -1901,13 +1961,6 @@ const FORMS = {
     if (f.dataset.id) Object.assign(habitById(f.dataset.id), fields);
     else state.habits.push({ id: uid(), log: {}, ...fields });
     commit('Habit saved');
-  },
-  goal(f) {
-    const d = new FormData(f);
-    const fields = { title: d.get('title').trim(), current: +d.get('current') || 0, target: +d.get('target') || 1, unit: d.get('unit').trim() };
-    if (f.dataset.id) Object.assign(goalById(f.dataset.id), fields);
-    else state.goals.push({ id: uid(), ...fields });
-    commit('Goal saved');
   },
   passcode(f) {
     const d = new FormData(f);
@@ -1930,6 +1983,20 @@ function commit(msg) { save(); closeModal(); render(); if (msg) toast(msg); }
    ========================================================= */
 const ACTIONS = {
   'toggle-nav': () => app.classList.toggle('nav-open'),
+  'copy-item': (el) => copyItem(el.dataset.key),
+  'paste-done': () => { ui.clip = null; render(); },
+  'busy-skip-day': (el) => {
+    const b = state.busy.find((x) => x.id === el.dataset.id), undo = snapshot();
+    b.overrides = { ...(b.overrides || {}), [el.dataset.date]: { skip: true } };
+    closeModal(); save(); render();
+    toast(`No ${b.title} on ${fmtDate(el.dataset.date, { weekday: 'long', month: 'short', day: 'numeric' })}`, undo);
+  },
+  'busy-reset-day': (el) => {
+    const b = state.busy.find((x) => x.id === el.dataset.id), undo = snapshot();
+    delete b.overrides[el.dataset.date];
+    closeModal(); save(); render();
+    toast(`${b.title} is back to normal that day`, undo);
+  },
   'new-test': (el) => openTestModal(null, el.dataset.list),
   'edit-test': (el) => openTestModal(el.dataset.id),
   'delete-test': (el) => {
@@ -2219,7 +2286,7 @@ const ACTIONS = {
     save(); render();
     toast('Moved back to unscheduled', undo);
   },
-  'edit-busy': (el) => openBusyModal(el.dataset.id),
+  'edit-busy': (el) => openBusyModal(el.dataset.id, el.dataset.date || null),
   'new-busy': () => openBusyModal(null),
   'delete-busy': (el) => askConfirm('Delete this busy time?', 'Delete', () => {
     state.busy = state.busy.filter((b) => b.id !== el.dataset.id);
@@ -2262,19 +2329,6 @@ const ACTIONS = {
     try { p = await Notification.requestPermission(); } catch (_) { /* blocked when embedded */ }
     toast(p === 'granted' ? 'Reminders will pop up as notifications' : 'Reminders will show inside Daybook');
     render();
-  },
-  'new-goal': () => openGoalModal(null),
-  'edit-goal': (el) => openGoalModal(el.dataset.id),
-  'delete-goal': (el) => {
-    askConfirm('Delete this goal?', 'Delete', () => {
-      state.goals = state.goals.filter((g) => g.id !== el.dataset.id);
-      commit('Goal deleted');
-    });
-  },
-  'goal-step': (el) => {
-    const g = goalById(el.dataset.id);
-    g.current = Math.max(0, g.current + +el.dataset.delta);
-    save(); render();
   },
 
   'hours-range': (el) => { ui.hoursRange = el.dataset.val; render(); },
@@ -2435,6 +2489,11 @@ document.addEventListener('click', (e) => {
   }
   if (!e.target.closest('[data-lp]')) closePickers();
   if (ui.skipClick) { ui.skipClick = false; return; } // the click that ends a resize shouldn't open the task
+  if (ui.clip && !e.target.closest('.modal, .place-banner, .toast')) {
+    const col = e.target.closest('.day-col'), cell = e.target.closest('.mcell');
+    if (col) { pasteAt(col.dataset.day, minutesAt(col, e.clientY)); return; }
+    if (cell) { pasteAt(cell.dataset.day, ui.clip.start); return; }
+  }
   if (ui.placing) {
     const col = e.target.closest('.day-col');
     if (col) { ACTIONS.slot(col, e); return; }
@@ -2470,11 +2529,6 @@ document.addEventListener('input', (e) => {
     save();
     $('#note-items').innerHTML = noteItemsHtml();
   }
-  else if (t.dataset.review) {
-    const wk = ymd(startOfWeek(new Date()));
-    state.reviews[wk] = { ...(state.reviews[wk] || {}), [t.dataset.review]: t.value, savedAt: Date.now() };
-    save();
-  }
 });
 
 document.addEventListener('change', (e) => {
@@ -2487,6 +2541,14 @@ document.addEventListener('change', (e) => {
     state.settings[t.dataset.setting] = t.value;
     if (state.settings.dayEnd <= state.settings.dayStart) { toast('The day has to end after it starts'); state.settings.dayEnd = '22:00'; render(); }
     save();
+  } else if (t.hasAttribute('data-scope')) {
+    $$('[data-scope-panel]', t.form).forEach((p) => p.classList.toggle('hidden', p.dataset.scopePanel !== t.value));
+  } else if (t.hasAttribute('data-ev-scope')) {
+    const all = t.value === 'all', f = t.form, ev = eventById(f.dataset.id);
+    f.querySelector('[data-repeat-field]').classList.toggle('hidden', !all);
+    f.querySelector('[data-until]').classList.toggle('hidden', !all);
+    f.querySelector('[data-scope-note]').textContent = all ? 'Changes apply to every time it happens. The date stays on the series start.' : 'Only this date changes. Every other time stays the same.';
+    if (all) { f.start.value = toHHMM(ev.start); f.end.value = toHHMM(Math.min(ev.start + ev.dur, 1439)); }
   } else if (t.hasAttribute('data-event-repeat')) {
     t.form.querySelector('[data-until]').classList.toggle('hidden', t.value === 'none');
   } else if (t.hasAttribute('data-study') && ui.study) {
@@ -2553,12 +2615,17 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { closeModal(); app.classList.remove('nav-open'); }
   if (e.key === 'Enter' && e.target.dataset.quickadd) quickAdd(e.target);
   if (e.key === 'Escape' && ui.placing) { ui.placing = null; render(); }
+  if (e.key === 'Escape' && ui.clip && !$('#modal-root').firstChild) { ui.clip = null; render(); }
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && currentView() === 'calendar' && !isEditing() && !window.getSelection()?.toString()) {
+    if (e.key === 'c' && hover.key) { e.preventDefault(); copyItem(hover.key); }
+    else if (e.key === 'v' && ui.clip && hover.col) { e.preventDefault(); pasteAt(hover.col.dataset.day, minutesAt(hover.col, hover.y)); }
+  }
   if (e.key === 'Enter' && e.target.hasAttribute('data-new-list')) addList(e.target.value);
 });
 
 window.addEventListener('hashchange', () => {
   app.classList.remove('nav-open');
-  if (currentView() !== 'calendar') ui.placing = null;
+  if (currentView() !== 'calendar') { ui.placing = null; ui.clip = null; }
   render();
   window.scrollTo(0, 0);
 });
@@ -2586,7 +2653,7 @@ document.addEventListener('dragstart', (e) => {
     const hourPx = el.parentElement.getBoundingClientRect().height / 24;
     offsetMin = ((e.clientY - el.getBoundingClientRect().top) / hourPx) * 60;
   }
-  drag = { key: el.dataset.drag, dur: item.kind === 'e' ? item.obj.dur : taskDur(item.obj), offsetMin };
+  drag = { key: el.dataset.drag, dur: item.kind === 't' ? taskDur(item.obj) : item.block.dur, offsetMin };
   e.dataTransfer.effectAllowed = 'move';
   e.dataTransfer.setData('text/plain', drag.key);
 });
@@ -2636,13 +2703,16 @@ document.addEventListener('drop', (e) => {
   }
   const item = calItem(drag.key);
   const col = e.target.closest('.day-col'), cell = e.target.closest('.mcell'), tray = e.target.closest('[data-drop="tray"]');
+  const verb = item.kind === 't' ? 'Blocked' : 'Moved';
+  const once = item.kind === 'r' || item.kind === 'b' ? ' (this date only)' : '';
   if (col) {
     const start = dropMinutes(col, e);
     placeItem(item, col.dataset.day, start, drag.dur);
-    toast(`${item.kind === 'e' ? 'Moved' : 'Blocked'} ${fmtDate(col.dataset.day)}, ${fmtTime(start)} – ${fmtTime(start + drag.dur)}`);
+    toast(`${verb} ${fmtDate(col.dataset.day)}, ${fmtTime(start)} – ${fmtTime(start + drag.dur)}${once}`);
   } else if (cell) {
-    placeItem(item, cell.dataset.day, item.block?.start ?? 540, drag.dur);
-    toast(`${item.kind === 'e' ? 'Moved' : 'Blocked'} ${fmtDate(cell.dataset.day)} at ${fmtTime(item.kind === 'e' ? item.obj.start : item.obj.block.start)}`);
+    const start = item.block?.start ?? 540;
+    placeItem(item, cell.dataset.day, start, drag.dur);
+    toast(`${verb} ${fmtDate(cell.dataset.day)} at ${fmtTime(start)}${once}`);
   } else if (tray && item.kind === 't' && item.obj.block) {
     item.obj.block = null;
     toast('Moved back to unscheduled');
@@ -2750,9 +2820,10 @@ function endResize() {
   ui.skipClick = true;
   setTimeout(() => { ui.skipClick = false; }, 0); // cleared if the release produced no click
   if (dur === b.dur) { render(); return; }
-  b.dur = dur;
+  if (item.kind === 'r' || item.kind === 'b') placeItem(item, item.occDate, b.start, dur);
+  else b.dur = dur;
   save(); render();
-  toast(`${item.title}: ${fmtDur(dur)}, ends ${fmtTime(b.start + dur)}`, undo);
+  toast(`${item.title}: ${fmtDur(dur)}, ends ${fmtTime(b.start + dur)}${item.kind === 'r' || item.kind === 'b' ? ' (this date only)' : ''}`, undo);
 }
 document.addEventListener('pointerup', endResize);
 document.addEventListener('pointercancel', endResize);
